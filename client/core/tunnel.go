@@ -13,14 +13,12 @@ import (
 
 // Buffer pools
 var (
-	// Small buffer for P2P mode: fits in one UDP packet (no fragmentation)
 	p2pBufPool = sync.Pool{
 		New: func() interface{} {
 			b := make([]byte, 1200)
 			return &b
 		},
 	}
-	// Large buffer for relay mode: maximize throughput
 	relayBufPool = sync.Pool{
 		New: func() interface{} {
 			b := make([]byte, 64*1024)
@@ -69,7 +67,6 @@ func (c *Client) StartForward(peerID, host string, remotePort, localPort int) er
 	c.forwardsMu.Unlock()
 
 	mode := c.getForwardMode(fullID)
-
 	c.emit(EventForwardStarted, ForwardEvent{
 		LocalPort: localPort, RemoteHost: host, RemotePort: remotePort,
 		PeerName: peerName, Mode: mode,
@@ -81,7 +78,6 @@ func (c *Client) StartForward(peerID, host string, remotePort, localPort int) er
 	return nil
 }
 
-// getForwardMode returns "P2P" if peer has direct connection, "RELAY" otherwise.
 func (c *Client) getForwardMode(peerID string) string {
 	c.peerConnsMu.RLock()
 	defer c.peerConnsMu.RUnlock()
@@ -155,10 +151,11 @@ func optimizeTCP(conn net.Conn) {
 		tc.SetNoDelay(true)
 		tc.SetReadBuffer(512 * 1024)
 		tc.SetWriteBuffer(512 * 1024)
+		tc.SetKeepAlive(true)
+		tc.SetKeepAlivePeriod(30 * time.Second)
 	}
 }
 
-// StopForward closes a forward and all its tunnels.
 func (c *Client) StopForward(localPort int) error {
 	c.forwardsMu.Lock()
 	fwd, ok := c.forwards[localPort]
@@ -234,9 +231,8 @@ func (c *Client) handleOpenTunnel(msg Message) {
 }
 
 // tunnelReadLoop: reads TCP, sends to peer.
-// P2P direct: read 1200 bytes (one UDP packet, no fragmentation).
-// Relay: read 64KB (maximize throughput).
-// Automatically picks the best path per-read based on current peer state.
+// Adapts buffer size and send path based on current peer mode.
+// No read deadline on idle — uses TCP keepalive instead.
 func (c *Client) tunnelReadLoop(tc *TunnelConn, peerID string) {
 	defer c.wg.Done()
 	defer func() {
@@ -258,13 +254,12 @@ func (c *Client) tunnelReadLoop(tc *TunnelConn, peerID string) {
 		default:
 		}
 
-		// Check current peer mode to decide buffer size and send path
+		// Check current peer mode
 		c.peerConnsMu.RLock()
 		pc := c.peerConns[peerID]
 		isP2P := pc != nil && pc.Mode == "direct" && pc.UDPAddr != nil && c.udpConn != nil
 		c.peerConnsMu.RUnlock()
 
-		// Check if user forced relay
 		forceRelay := false
 		if tc.Forward != nil {
 			tc.Forward.Mu.Lock()
@@ -284,7 +279,9 @@ func (c *Client) tunnelReadLoop(tc *TunnelConn, peerID string) {
 		}
 		buf := *bufPtr
 
-		tc.Conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+		// No hard read deadline — rely on TCP keepalive to detect dead connections.
+		// Only set a very long deadline to prevent goroutine leak on forgotten connections.
+		tc.Conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
 		n, err := tc.Conn.Read(buf)
 		if n > 0 {
 			if tc.Forward != nil {
@@ -292,10 +289,12 @@ func (c *Client) tunnelReadLoop(tc *TunnelConn, peerID string) {
 			}
 
 			if useP2P {
-				// Single UDP packet, no fragmentation needed (buf ≤ 1200)
-				c.sendOneUDPPacket(pc, idBytes, buf[:n])
+				// Try UDP, fallback to relay on failure
+				if !c.trySendUDP(pc, idBytes, buf[:n]) {
+					encoded := base64.StdEncoding.EncodeToString(buf[:n])
+					c.sendRelay(peerID, "tunnel_data", TunnelData{TunnelID: tc.TunnelID, Data: encoded})
+				}
 			} else {
-				// Relay: base64 + JSON over WebSocket
 				encoded := base64.StdEncoding.EncodeToString(buf[:n])
 				c.sendRelay(peerID, "tunnel_data", TunnelData{TunnelID: tc.TunnelID, Data: encoded})
 			}
@@ -313,47 +312,44 @@ func (c *Client) tunnelReadLoop(tc *TunnelConn, peerID string) {
 	}
 }
 
-// sendOneUDPPacket sends exactly one UDP packet (no fragmentation).
-// Packet: [0x00][8-byte tunnelID][payload or encrypted payload]
-func (c *Client) sendOneUDPPacket(pc *PeerConn, idBytes []byte, data []byte) {
+// trySendUDP sends one UDP packet, returns false if send fails.
+func (c *Client) trySendUDP(pc *PeerConn, idBytes []byte, data []byte) bool {
 	hasCrypto := pc.Crypto != nil && pc.Crypto.Encrypted
+	addr := pc.UDPAddr
 
+	var pkt []byte
 	if hasCrypto {
 		encrypted, err := pc.Crypto.Encrypt(data)
 		if err != nil {
-			// Encryption failed, send plaintext
-			pkt := make([]byte, 9+len(data))
-			pkt[0] = 0x00
-			copy(pkt[1:9], idBytes)
-			copy(pkt[9:], data)
-			c.udpConn.WriteToUDP(pkt, pc.UDPAddr)
-			return
+			return false
 		}
-		pkt := make([]byte, 9+len(encrypted))
+		pkt = make([]byte, 9+len(encrypted))
 		pkt[0] = 0x00
 		copy(pkt[1:9], idBytes)
 		copy(pkt[9:], encrypted)
-		c.udpConn.WriteToUDP(pkt, pc.UDPAddr)
 	} else {
-		pkt := make([]byte, 9+len(data))
+		pkt = make([]byte, 9+len(data))
 		pkt[0] = 0x00
 		copy(pkt[1:9], idBytes)
 		copy(pkt[9:], data)
-		c.udpConn.WriteToUDP(pkt, pc.UDPAddr)
 	}
+
+	_, err := c.udpConn.WriteToUDP(pkt, addr)
+	return err == nil
 }
 
-// sendUDPDirect is the method-compatible wrapper.
+// sendUDPDirect fragments large data into MTU-safe chunks.
 func (c *Client) sendUDPDirect(pc *PeerConn, tunnelID string, data []byte) bool {
 	idBytes := tunnelIDToBytes(tunnelID)
-	// For data > 1200, we must fragment
 	const maxPayload = 1200
 	for offset := 0; offset < len(data); offset += maxPayload {
 		end := offset + maxPayload
 		if end > len(data) {
 			end = len(data)
 		}
-		c.sendOneUDPPacket(pc, idBytes, data[offset:end])
+		if !c.trySendUDP(pc, idBytes, data[offset:end]) {
+			return false
+		}
 	}
 	return true
 }
@@ -393,7 +389,8 @@ func (c *Client) handleTunnelData(msg Message) {
 	if tc.Forward != nil {
 		atomic.AddInt64(&tc.Forward.BytesDown, int64(len(data)))
 	}
-	tc.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	// Generous write deadline — don't kill tunnel on temporary slowness
+	tc.Conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	if _, err := tc.Conn.Write(data); err != nil {
 		c.closeTunnel(td.TunnelID)
 	}

@@ -565,15 +565,13 @@ func (c *Client) handleUDPTunnelData(tunnelID string, data []byte) {
 		return
 	}
 
-	// Count bytes downloaded
 	if tc.Forward != nil {
 		atomic.AddInt64(&tc.Forward.BytesDown, int64(len(data)))
 	}
 
-	tc.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if _, err := tc.Conn.Write(data); err != nil {
-		c.closeTunnel(tunnelID)
-	}
+	// Generous deadline — don't kill tunnel on temporary TCP backpressure
+	tc.Conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	tc.Conn.Write(data) // ignore error — TCP keepalive will detect dead conn
 }
 
 // handleEncryptedUDPData decrypts and processes tunnel data from a P2P peer.
@@ -606,7 +604,7 @@ func (c *Client) startRetryLoop() {
 	defer c.wg.Done()
 
 	retryTicker := time.NewTicker(15 * time.Second)
-	keepaliveTicker := time.NewTicker(20 * time.Second) // NAT keepalive
+	keepaliveTicker := time.NewTicker(10 * time.Second) // NAT keepalive every 10s (safe for most NATs)
 	defer retryTicker.Stop()
 	defer keepaliveTicker.Stop()
 
