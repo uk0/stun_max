@@ -7,11 +7,12 @@ import (
 var serverStartTime = time.Now()
 
 type ServerStats struct {
-	Uptime     string     `json:"uptime"`
-	TotalRooms int        `json:"total_rooms"`
-	TotalPeers int        `json:"total_peers"`
-	TotalBytes int64      `json:"total_bytes_relayed"`
-	Rooms      []RoomInfo `json:"rooms"`
+	Uptime      string     `json:"uptime"`
+	TotalRooms  int        `json:"total_rooms"`
+	TotalPeers  int        `json:"total_peers"`
+	TotalBytes  int64      `json:"total_bytes_relayed"`
+	ActiveConns int64      `json:"active_connections"`
+	Rooms       []RoomInfo `json:"rooms"`
 }
 
 func (h *Hub) getStats() ServerStats {

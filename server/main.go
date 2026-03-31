@@ -8,9 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,7 +21,7 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  64 * 1024,
 	WriteBufferSize: 64 * 1024,
-	CheckOrigin:     func(r *http.Request) bool { return true }, // CLI clients need this
+	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
 var (
@@ -27,12 +29,15 @@ var (
 	relayManager *RelayManager
 	authToken    string
 	sessions     sync.Map
-	loginLimiter = newRateLimiter(5, time.Minute)  // 5 login attempts per minute per IP
-	wsLimiter    = newRateLimiter(20, time.Minute) // 20 new WS connections per minute per IP
-	joinLimiter  = newRateLimiter(10, time.Minute) // 10 room join attempts per minute per client
+	activeConns  int64 // atomic: current WebSocket connections
+	maxConns     int64 = 5000
+
+	loginLimiter = newRateLimiter(5, time.Minute)
+	wsLimiter    = newRateLimiter(20, time.Minute)
+	joinLimiter  = newRateLimiter(10, time.Minute)
 )
 
-// --- Simple rate limiter ---
+// --- Rate limiter ---
 
 type rateLimiter struct {
 	counts map[string][]time.Time
@@ -50,7 +55,6 @@ func (rl *rateLimiter) allow(key string) bool {
 	defer rl.mu.Unlock()
 	now := time.Now()
 	cutoff := now.Add(-rl.window)
-	// Clean old entries
 	var valid []time.Time
 	for _, t := range rl.counts[key] {
 		if t.After(cutoff) {
@@ -77,11 +81,14 @@ func generateToken(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// clientIP extracts the real client IP. Does NOT trust X-Forwarded-For
+// to prevent rate limiter bypass via header spoofing.
 func clientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return strings.Split(fwd, ",")[0]
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
 	}
-	return strings.Split(r.RemoteAddr, ":")[0]
+	return host
 }
 
 // --- Session auth with expiry ---
@@ -102,8 +109,7 @@ func validSession(token string) bool {
 	if !ok {
 		return false
 	}
-	created := v.(time.Time)
-	if time.Since(created) > sessionMaxAge {
+	if time.Since(v.(time.Time)) > sessionMaxAge {
 		sessions.Delete(token)
 		return false
 	}
@@ -114,8 +120,7 @@ func getSessionToken(r *http.Request) string {
 	if c, err := r.Cookie("stun_max_token"); err == nil {
 		return c.Value
 	}
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		return strings.TrimPrefix(auth, "Bearer ")
 	}
 	return ""
@@ -134,8 +139,13 @@ func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 // --- Handlers ---
 
 func serveWs(w http.ResponseWriter, r *http.Request) {
-	if !wsLimiter.allow(clientIP(r)) {
+	ip := clientIP(r)
+	if !wsLimiter.allow(ip) {
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+	if atomic.LoadInt64(&activeConns) >= maxConns {
+		http.Error(w, "server full", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -143,25 +153,26 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	atomic.AddInt64(&activeConns, 1)
 
 	clientID := generateID()
 	client := &Client{
-		hub:  hub,
-		conn: conn,
-		send: make(chan []byte, 1024),
-		id:   clientID,
-		status: "connecting",
+		hub: hub, conn: conn, send: make(chan []byte, 1024),
+		id: clientID, status: "connecting",
 	}
 
 	hub.register <- client
 
 	welcomePayload, _ := json.Marshal(map[string]string{"id": clientID})
 	welcome := Message{Type: "welcome", Payload: json.RawMessage(welcomePayload)}
-	welcomeData, _ := json.Marshal(welcome)
-	client.send <- welcomeData
+	data, _ := json.Marshal(welcome)
+	client.send <- data
 
 	go client.writePump()
-	go client.readPump()
+	go func() {
+		client.readPump()
+		atomic.AddInt64(&activeConns, -1)
+	}()
 }
 
 func apiLogin(w http.ResponseWriter, r *http.Request) {
@@ -169,22 +180,17 @@ func apiLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
-
 	ip := clientIP(r)
 	if !loginLimiter.allow(ip) {
-		log.Printf("Login rate limited: %s", ip)
-		http.Error(w, `{"error":"too many attempts, try later"}`, http.StatusTooManyRequests)
+		http.Error(w, `{"error":"too many attempts"}`, http.StatusTooManyRequests)
 		return
 	}
 
-	var req struct {
-		Password string `json:"password"`
-	}
+	var req struct{ Password string `json:"password"` }
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
 		return
 	}
-
 	if req.Password != authToken {
 		log.Printf("Login failed from %s", ip)
 		http.Error(w, `{"error":"invalid password"}`, http.StatusUnauthorized)
@@ -193,14 +199,9 @@ func apiLogin(w http.ResponseWriter, r *http.Request) {
 
 	token := createSession()
 	http.SetCookie(w, &http.Cookie{
-		Name:     "stun_max_token",
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		MaxAge:   86400,
-		SameSite: http.SameSiteLaxMode,
+		Name: "stun_max_token", Value: token, Path: "/",
+		HttpOnly: true, MaxAge: 86400, SameSite: http.SameSiteLaxMode,
 	})
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
 }
@@ -208,10 +209,8 @@ func apiLogin(w http.ResponseWriter, r *http.Request) {
 func apiRooms(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		rooms := hub.getRoomsInfo()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(rooms)
-
+		json.NewEncoder(w).Encode(hub.getRoomsInfo())
 	case http.MethodPost:
 		var req struct {
 			Name     string `json:"name"`
@@ -226,27 +225,22 @@ func apiRooms(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"invalid room name"}`, http.StatusBadRequest)
 			return
 		}
-
 		passHash := ""
 		if req.Password != "" {
 			h := sha256.Sum256([]byte(req.Password))
 			passHash = hex.EncodeToString(h[:])
 		}
-
 		hub.getOrCreateRoom(req.Name, passHash)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"name": req.Name, "protected": req.Password != ""})
-
 	case http.MethodDelete:
 		name := r.URL.Query().Get("name")
 		if name == "" {
 			http.Error(w, `{"error":"room name required"}`, http.StatusBadRequest)
 			return
 		}
-		deleted := hub.deleteRoom(name)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]bool{"deleted": deleted})
-
+		json.NewEncoder(w).Encode(map[string]bool{"deleted": hub.deleteRoom(name)})
 	default:
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 	}
@@ -270,9 +264,8 @@ func apiBan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"room and client_id required"}`, http.StatusBadRequest)
 		return
 	}
-	ok := hub.banClient(req.Room, req.ClientID)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": ok})
+	json.NewEncoder(w).Encode(map[string]bool{"ok": hub.banClient(req.Room, req.ClientID)})
 }
 
 func apiUnban(w http.ResponseWriter, r *http.Request) {
@@ -288,30 +281,30 @@ func apiUnban(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"room and client_id required"}`, http.StatusBadRequest)
 		return
 	}
-	ok := hub.unbanClient(req.Room, req.ClientID)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": ok})
+	json.NewEncoder(w).Encode(map[string]bool{"ok": hub.unbanClient(req.Room, req.ClientID)})
 }
 
 func apiStats(w http.ResponseWriter, r *http.Request) {
 	stats := hub.getStats()
+	stats.ActiveConns = atomic.LoadInt64(&activeConns)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
 }
 
 func serveStatic(webDir string) http.HandlerFunc {
 	fs := http.FileServer(http.Dir(webDir))
-	return func(w http.ResponseWriter, r *http.Request) {
-		fs.ServeHTTP(w, r)
-	}
+	return func(w http.ResponseWriter, r *http.Request) { fs.ServeHTTP(w, r) }
 }
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
-	webPass := flag.String("web-password", "", "dashboard password (empty=auto-generate)")
-	webDir := flag.String("web-dir", "../web", "web static files path")
+	webPass := flag.String("web-password", "", "dashboard password (empty=auto)")
+	webDir := flag.String("web-dir", "../web", "web static files")
+	maxC := flag.Int64("max-connections", 5000, "max WebSocket connections")
 	flag.Parse()
 
+	maxConns = *maxC
 	hub = newHub()
 	go hub.run()
 	relayManager = newRelayManager()
@@ -327,6 +320,7 @@ func main() {
 	fmt.Println("═══════════════════════════════════════")
 	fmt.Printf("  Listen:     %s\n", *addr)
 	fmt.Printf("  Password:   %s\n", authToken)
+	fmt.Printf("  Max Conns:  %d\n", maxConns)
 	fmt.Println("═══════════════════════════════════════")
 
 	http.HandleFunc("/ws", serveWs)

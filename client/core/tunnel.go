@@ -19,6 +19,14 @@ var relayBufPool = sync.Pool{
 	},
 }
 
+// directFramePool reuses frame buffers: 12-byte header + 64KB data
+var directFramePool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 12+64*1024)
+		return &b
+	},
+}
+
 // StartForward creates a local TCP listener that tunnels to a remote peer.
 func (c *Client) StartForward(peerID, host string, remotePort, localPort int) error {
 	fullID, err := c.resolvePeerID(peerID)
@@ -214,14 +222,7 @@ func (c *Client) handleOpenTunnel(msg Message) {
 }
 
 // tunnelReadLoop reads TCP and sends to peer.
-//
-// Transport priority:
-// 1. Direct TCP (if hole punch succeeded and TCP upgrade worked) — reliable, ordered, fast
-// 2. WebSocket relay — always available fallback
-//
-// Direct TCP is a real TCP connection established after UDP hole punch.
-// It gives us reliability + ordering + flow control without the complexity
-// of implementing these over UDP.
+// Transport: Direct TCP (P2P) if available, WebSocket relay otherwise.
 func (c *Client) tunnelReadLoop(tc *TunnelConn, peerID string) {
 	defer c.wg.Done()
 	defer func() {
@@ -232,12 +233,88 @@ func (c *Client) tunnelReadLoop(tc *TunnelConn, peerID string) {
 		c.sendTunnelClose(peerID, tc.TunnelID)
 	}()
 
+	idBytes := tunnelIDToBytes(tc.TunnelID)
+
+	// Snapshot direct TCP connection (check once, use for lifetime)
+	// If it breaks mid-stream, we fall back to relay automatically.
+	c.peerConnsMu.RLock()
+	pc := c.peerConns[peerID]
+	var directConn net.Conn
+	if pc != nil {
+		directConn = pc.DirectTCP
+	}
+	c.peerConnsMu.RUnlock()
+
+	if directConn != nil {
+		// Fast path: direct TCP with zero-copy framing
+		c.tunnelReadDirect(tc, peerID, directConn, idBytes)
+		return
+	}
+
+	// Slow path: WebSocket relay
+	c.tunnelReadRelay(tc, peerID)
+}
+
+// tunnelReadDirect: high-performance direct TCP path.
+// Single write per frame (header+data in one buffer), pooled buffers.
+func (c *Client) tunnelReadDirect(tc *TunnelConn, peerID string, directConn net.Conn, idBytes []byte) {
+	framePtr := directFramePool.Get().(*[]byte)
+	defer directFramePool.Put(framePtr)
+	frame := *framePtr
+
+	// Pre-fill tunnel ID in frame header (never changes)
+	copy(frame[:8], idBytes)
+
+	for {
+		select {
+		case <-tc.Done:
+			return
+		case <-c.done:
+			return
+		default:
+		}
+
+		tc.Conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
+		// Read directly into frame buffer after the 12-byte header
+		n, err := tc.Conn.Read(frame[12:])
+		if n > 0 {
+			if tc.Forward != nil {
+				atomic.AddInt64(&tc.Forward.BytesUp, int64(n))
+			}
+
+			// Write length into header
+			frame[8] = byte(n >> 24)
+			frame[9] = byte(n >> 16)
+			frame[10] = byte(n >> 8)
+			frame[11] = byte(n)
+
+			// Single write: header + data in one syscall
+			directConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_, werr := directConn.Write(frame[:12+n])
+			if werr != nil {
+				// Direct TCP broken — fall back to relay for remaining data
+				c.peerConnsMu.Lock()
+				if pc, ok := c.peerConns[peerID]; ok {
+					pc.DirectTCP = nil
+				}
+				c.peerConnsMu.Unlock()
+				directConn.Close()
+				// Continue with relay path
+				c.tunnelReadRelay(tc, peerID)
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// tunnelReadRelay: WebSocket relay path (always works).
+func (c *Client) tunnelReadRelay(tc *TunnelConn, peerID string) {
 	bufPtr := relayBufPool.Get().(*[]byte)
 	defer relayBufPool.Put(bufPtr)
 	buf := *bufPtr
-
-	// Pre-encode tunnel ID header for direct TCP framing
-	idBytes := tunnelIDToBytes(tc.TunnelID)
 
 	for {
 		select {
@@ -254,47 +331,8 @@ func (c *Client) tunnelReadLoop(tc *TunnelConn, peerID string) {
 			if tc.Forward != nil {
 				atomic.AddInt64(&tc.Forward.BytesUp, int64(n))
 			}
-
-			// Try direct TCP first
-			sent := false
-			c.peerConnsMu.RLock()
-			pc := c.peerConns[peerID]
-			var directConn net.Conn
-			if pc != nil {
-				directConn = pc.DirectTCP
-			}
-			c.peerConnsMu.RUnlock()
-
-			if directConn != nil {
-				// Direct TCP framing: [8-byte tunnelID][4-byte length][data]
-				header := make([]byte, 12)
-				copy(header[:8], idBytes)
-				header[8] = byte(n >> 24)
-				header[9] = byte(n >> 16)
-				header[10] = byte(n >> 8)
-				header[11] = byte(n)
-
-				directConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				_, err1 := directConn.Write(header)
-				_, err2 := directConn.Write(buf[:n])
-				if err1 == nil && err2 == nil {
-					sent = true
-				} else {
-					// Direct TCP broken, clear it
-					c.peerConnsMu.Lock()
-					if pc != nil {
-						pc.DirectTCP = nil
-					}
-					c.peerConnsMu.Unlock()
-					directConn.Close()
-				}
-			}
-
-			if !sent {
-				// Relay fallback
-				encoded := base64.StdEncoding.EncodeToString(buf[:n])
-				c.sendRelay(peerID, "tunnel_data", TunnelData{TunnelID: tc.TunnelID, Data: encoded})
-			}
+			encoded := base64.StdEncoding.EncodeToString(buf[:n])
+			c.sendRelay(peerID, "tunnel_data", TunnelData{TunnelID: tc.TunnelID, Data: encoded})
 		}
 		if err != nil {
 			return
