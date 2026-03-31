@@ -10,7 +10,7 @@ P2P tunnel system with STUN hole punching and automatic server relay fallback. E
 │ (GUI/CLI)│    X25519 + AES-256-GCM     │ (GUI/CLI)│
 └────┬─────┘                             └────┬─────┘
      │  WebSocket (signaling + relay)         │
-     └──────────────┬────────────────────────┘
+     └──────────────┬─────────────────────────┘
                     │
              ┌──────┴──────┐
              │   Server    │
@@ -24,6 +24,9 @@ P2P tunnel system with STUN hole punching and automatic server relay fallback. E
 - **Encrypted**: X25519 ECDH key exchange + AES-256-GCM on P2P channel
 
 ## Quick Start
+
+![img.png](img/img.png)
+
 
 ### 1. Deploy Server
 

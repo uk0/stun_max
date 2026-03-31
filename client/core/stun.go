@@ -219,7 +219,16 @@ func (c *Client) sendStunInfo(to string) {
 	if c.publicAddr == "" {
 		return
 	}
-	payload, _ := json.Marshal(map[string]string{"addr": c.publicAddr})
+	localAddr := getLocalIP()
+	var localUDP string
+	if localAddr != "" && c.udpConn != nil {
+		localPort := c.udpConn.LocalAddr().(*net.UDPAddr).Port
+		localUDP = fmt.Sprintf("%s:%d", localAddr, localPort)
+	}
+	payload, _ := json.Marshal(map[string]string{
+		"addr":  c.publicAddr,
+		"local": localUDP,
+	})
 	c.sendMsg(Message{
 		Type:    "stun_info",
 		To:      to,
@@ -242,13 +251,27 @@ func (c *Client) handleStunInfo(msg Message) {
 		return
 	}
 	var info struct {
-		Addr string `json:"addr"`
+		Addr  string `json:"addr"`
+		Local string `json:"local"`
 	}
 	if err := json.Unmarshal(msg.Payload, &info); err != nil || info.Addr == "" {
 		return
 	}
 
-	udpAddr, err := net.ResolveUDPAddr("udp4", info.Addr)
+	// Detect LAN peer: same public IP = same network
+	// If so, use the local/private address for direct connection (much faster)
+	targetAddr := info.Addr
+	isLAN := false
+	if info.Local != "" && c.publicAddr != "" {
+		myPubIP, _, _ := net.SplitHostPort(c.publicAddr)
+		peerPubIP, _, _ := net.SplitHostPort(info.Addr)
+		if myPubIP != "" && myPubIP == peerPubIP {
+			targetAddr = info.Local
+			isLAN = true
+		}
+	}
+
+	udpAddr, err := net.ResolveUDPAddr("udp4", targetAddr)
 	if err != nil {
 		return
 	}
@@ -266,7 +289,9 @@ func (c *Client) handleStunInfo(msg Message) {
 	pc.UDPAddr = udpAddr
 	c.peerConnsMu.Unlock()
 
-	if c.verbose {
+	if isLAN {
+		c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("LAN peer detected: %s → using local address %s", shortID(msg.From), targetAddr)})
+	} else if c.verbose {
 		c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("Received STUN endpoint from %s: %s", shortID(msg.From), info.Addr)})
 	}
 
@@ -614,5 +639,15 @@ func (c *Client) startRetryLoop() {
 			}
 		}
 	}
+}
+
+// getLocalIP returns the preferred outbound local IP address.
+func getLocalIP() string {
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
