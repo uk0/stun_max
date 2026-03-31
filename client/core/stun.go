@@ -308,11 +308,11 @@ func (c *Client) handleStunInfo(msg Message) {
 
 	// Attempt hole punch if we have a UDP socket
 	if c.udpConn != nil && pc.Mode != "direct" {
-		go c.attemptHolePunch(msg.From)
+		go c.attemptHolePunch(msg.From, isLAN)
 	}
 }
 
-func (c *Client) attemptHolePunch(peerID string) {
+func (c *Client) attemptHolePunch(peerID string, isLAN bool) {
 	c.peerConnsMu.RLock()
 	pc := c.peerConns[peerID]
 	c.peerConnsMu.RUnlock()
@@ -344,6 +344,12 @@ func (c *Client) attemptHolePunch(peerID string) {
 		}
 		c.udpConn.WriteToUDP(punch, addr)
 		time.Sleep(25 * time.Millisecond)
+	}
+
+	// Phase 2 & 3: only for WAN (Birthday Attack + port prediction).
+	// Skip for LAN — no NAT to punch through, and extra sockets cause ICMP errors.
+	if isLAN {
+		return
 	}
 
 	// Phase 2: Multi-socket parallel punch (Birthday Attack style)
@@ -491,15 +497,22 @@ func (c *Client) udpReadLoop() {
 		c.udpConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		n, addr, err := c.udpConn.ReadFromUDP(buf)
 		if err != nil {
+			// Timeout is normal — just loop and check c.done
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
+			// Any other error: DON'T exit. Transient errors (ICMP unreachable,
+			// buffer overflow, etc.) should not kill the entire P2P receive path.
+			// Only exit when c.done is closed.
 			select {
 			case <-c.done:
 				return
 			default:
+				continue // ignore transient error, keep reading
 			}
-			return
+		}
+		if n == 0 {
+			continue
 		}
 		data := buf[:n]
 
@@ -654,7 +667,7 @@ func (c *Client) startRetryLoop() {
 			}
 			c.peerConnsMu.RUnlock()
 			for _, peerID := range retryPeers {
-				go c.attemptHolePunch(peerID)
+				go c.attemptHolePunch(peerID, false) // retry is always WAN-style
 			}
 		}
 	}
