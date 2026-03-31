@@ -1,0 +1,12 @@
+.idea/
+.DS_Store
+.env
+*.key
+*.pem
+*.crt
+docs/
+CLAUDE.md
+build/
+stun_max-*
+natcheck-*
+*.exe

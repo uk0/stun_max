@@ -1,0 +1,155 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0a0a0f;
+    color: #e0e0e0;
+    min-height: 100vh;
+}
+
+/* Login page */
+#login-page {
+    display: flex; align-items: center; justify-content: center;
+    height: 100vh;
+}
+#login-box {
+    text-align: center; padding: 48px; border-radius: 16px;
+    background: #111122; border: 1px solid #222; width: 380px;
+}
+#login-box h1 { color: #00d4ff; font-size: 2rem; margin-bottom: 6px; }
+#login-box p { color: #666; margin-bottom: 28px; font-size: 14px; }
+#login-box input {
+    width: 100%; padding: 12px 16px; border-radius: 8px;
+    border: 1px solid #333; background: #1a1a2e; color: #fff;
+    font-size: 15px; margin-bottom: 14px; outline: none;
+    transition: border-color 0.2s;
+}
+#login-box input:focus { border-color: #00d4ff; }
+#login-box button {
+    width: 100%; padding: 12px; border-radius: 8px; border: none;
+    background: #00d4ff; color: #000; font-weight: 600; font-size: 15px;
+    cursor: pointer; transition: background 0.2s;
+}
+#login-box button:hover { background: #00b8d4; }
+#login-error { color: #ff4444; font-size: 13px; margin-top: 12px; min-height: 18px; }
+
+/* Dashboard */
+#dashboard-page { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+#header {
+    display: flex; align-items: center; gap: 16px;
+    padding-bottom: 20px; border-bottom: 1px solid #222; margin-bottom: 24px;
+}
+#header h1 { color: #00d4ff; font-size: 1.6rem; }
+#subtitle { color: #666; font-size: 14px; flex: 1; }
+#status-dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
+#status-text { color: #888; font-size: 13px; }
+#logout-btn {
+    padding: 6px 14px; border-radius: 6px; border: 1px solid #444;
+    background: transparent; color: #888; cursor: pointer; font-size: 12px;
+}
+#logout-btn:hover { border-color: #ff4444; color: #ff4444; }
+
+/* Stats */
+#stats-bar { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 24px; }
+.stat-card {
+    background: #111122; border: 1px solid #222; border-radius: 12px;
+    padding: 18px; text-align: center;
+}
+.stat-value { font-size: 1.8rem; font-weight: 700; color: #00d4ff; }
+.stat-label { font-size: 11px; color: #888; text-transform: uppercase; margin-top: 4px; }
+
+/* Create room bar */
+#create-room-bar {
+    display: flex; gap: 10px; margin-bottom: 24px;
+    padding: 16px; background: #111122; border: 1px solid #222; border-radius: 12px;
+}
+#create-room-bar input {
+    flex: 1; padding: 10px 14px; border-radius: 8px;
+    border: 1px solid #333; background: #1a1a2e; color: #fff;
+    font-size: 14px; outline: none;
+}
+#create-room-bar input:focus { border-color: #00d4ff; }
+#create-room-btn {
+    padding: 10px 20px; border-radius: 8px; border: none;
+    background: #00d4ff; color: #000; font-weight: 600; font-size: 14px;
+    cursor: pointer; white-space: nowrap;
+}
+#create-room-btn:hover { background: #00b8d4; }
+
+/* Rooms */
+#rooms-container h2 {
+    font-size: 13px; color: #888; text-transform: uppercase;
+    margin-bottom: 14px; letter-spacing: 1px;
+}
+.room-card {
+    background: #111122; border: 1px solid #222; border-radius: 12px;
+    padding: 18px; margin-bottom: 14px;
+}
+.room-header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.room-name { font-size: 17px; font-weight: 600; color: #fff; }
+.room-badge {
+    font-size: 11px; padding: 3px 10px; border-radius: 10px; font-weight: 600;
+}
+.badge-protected { background: #ff980033; color: #ff9800; border: 1px solid #ff980055; }
+.badge-open { background: #00c85333; color: #00c853; border: 1px solid #00c85355; }
+.room-peer-count { color: #888; font-size: 13px; margin-left: auto; }
+.room-traffic { color: #00d4ff; font-size: 12px; font-family: monospace; }
+.room-delete {
+    padding: 4px 10px; border-radius: 6px; border: 1px solid #ff444444;
+    background: transparent; color: #ff4444; cursor: pointer; font-size: 11px;
+}
+.room-delete:hover { background: #ff4444; color: #fff; }
+
+.peer-table { width: 100%; }
+.peer-table th {
+    text-align: left; font-size: 11px; color: #666; text-transform: uppercase;
+    padding: 8px 12px; border-bottom: 1px solid #222;
+}
+.peer-table td { padding: 9px 12px; border-bottom: 1px solid #1a1a2e; font-size: 13px; }
+.peer-table tr:last-child td { border-bottom: none; }
+.peer-id { font-family: monospace; color: #aaa; }
+.peer-name-cell { color: #fff; }
+.peer-endpoint { font-family: monospace; color: #888; font-size: 12px; }
+
+.mode-badge {
+    font-size: 12px; padding: 4px 10px; border-radius: 6px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 4px;
+}
+.mode-direct { background: #00c85322; color: #00c853; border: 1px solid #00c85344; }
+.mode-relay { background: #ff980022; color: #ff9800; border: 1px solid #ff980044; }
+.mode-connecting { background: #66666622; color: #888; border: 1px solid #66666644; }
+
+.empty-state { text-align: center; color: #444; padding: 50px 20px; font-size: 15px; }
+
+.peer-ban-btn {
+    padding: 3px 9px; border-radius: 5px; border: 1px solid #ff444444;
+    background: transparent; color: #ff6666; cursor: pointer; font-size: 11px;
+}
+.peer-ban-btn:hover { background: #ff4444; color: #fff; border-color: #ff4444; }
+
+.banned-section {
+    margin-top: 12px; padding: 12px 14px;
+    background: #1a0a0a; border: 1px solid #ff444422; border-radius: 8px;
+}
+.banned-title {
+    font-size: 11px; color: #ff6666; text-transform: uppercase;
+    letter-spacing: 1px; margin-bottom: 8px; font-weight: 600;
+}
+.banned-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.banned-entry {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #ff444411; border: 1px solid #ff444433;
+    border-radius: 6px; padding: 4px 8px;
+}
+.banned-id { font-family: monospace; font-size: 12px; color: #ff8888; }
+.peer-unban-btn {
+    padding: 2px 7px; border-radius: 4px; border: 1px solid #00c85344;
+    background: transparent; color: #00c853; cursor: pointer; font-size: 11px;
+}
+.peer-unban-btn:hover { background: #00c853; color: #000; }
+
+@media (max-width: 768px) {
+    #stats-bar { grid-template-columns: repeat(2,1fr); }
+    #dashboard-page { padding: 16px; }
+    #create-room-bar { flex-direction: column; }
+}

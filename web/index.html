@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STUN Max</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Login -->
+        <div id="login-page">
+            <div id="login-box">
+                <h1>STUN Max</h1>
+                <p>Signal Server Dashboard</p>
+                <input id="login-password" type="password" placeholder="Enter password..." autofocus />
+                <button id="login-btn">Login</button>
+                <div id="login-error"></div>
+            </div>
+        </div>
+
+        <!-- Dashboard -->
+        <div id="dashboard-page" style="display:none">
+            <div id="header">
+                <h1>STUN Max</h1>
+                <span id="subtitle">Dashboard</span>
+                <span id="status-dot"></span>
+                <span id="status-text">Loading...</span>
+                <button id="logout-btn">Logout</button>
+            </div>
+            <div id="stats-bar">
+                <div class="stat-card"><div class="stat-value" id="room-count">0</div><div class="stat-label">Rooms</div></div>
+                <div class="stat-card"><div class="stat-value" id="peer-count">0</div><div class="stat-label">Peers</div></div>
+                <div class="stat-card"><div class="stat-value" id="direct-count">0</div><div class="stat-label" style="color:#00c853">⚡ P2P</div></div>
+                <div class="stat-card"><div class="stat-value" id="relay-count">0</div><div class="stat-label" style="color:#ff9800">🔄 Relay</div></div>
+            </div>
+
+            <!-- Create Room -->
+            <div id="create-room-bar">
+                <input id="new-room-name" placeholder="Room name" />
+                <input id="new-room-pass" type="password" placeholder="Password (optional)" />
+                <button id="create-room-btn">+ Create Room</button>
+            </div>
+
+            <!-- Rooms -->
+            <div id="rooms-container">
+                <h2>Active Rooms</h2>
+                <div id="rooms-list"></div>
+                <div id="no-rooms" class="empty-state">No active rooms</div>
+            </div>
+        </div>
+    </div>
+    <script src="dashboard.js"></script>
+</body>
+</html>
