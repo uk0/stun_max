@@ -150,7 +150,6 @@ func (c *Client) handleJoin(msg Message) {
 	roomName := msg.Room
 	var passwordHash string
 
-	// Extract room, password_hash, name, and services from payload
 	if msg.Payload != nil {
 		var payload struct {
 			Room         string   `json:"room"`
@@ -172,26 +171,31 @@ func (c *Client) handleJoin(msg Message) {
 	}
 
 	if roomName == "" {
-		log.Printf("Client %s join with no room name", c.id)
+		c.sendError("room name required")
 		return
 	}
 
-	// Leave current room if any
+	// Rate limit join attempts
+	if !joinLimiter.allow(c.id) {
+		c.sendError("too many join attempts, please wait. Repeated attempts may result in IP ban.")
+		log.Printf("Client %s join rate limited", c.id)
+		return
+	}
+
 	if c.roomKey != "" {
 		c.handleLeave()
 	}
 
-	room := c.hub.getOrCreateRoom(roomName, passwordHash)
+	// Rooms must be created via dashboard — no auto-create
+	room, reason := c.hub.findRoomByName(roomName, passwordHash)
+	if room == nil {
+		c.sendError(reason + ". Repeated failed attempts may result in IP ban.")
+		log.Printf("Client %s join rejected: %s (room: %s)", c.id, reason, roomName)
+		return
+	}
 
-	// Check blacklist
 	if room.IsBanned(c.id) {
-		errPayload, _ := json.Marshal(map[string]string{"error": "banned from this room"})
-		errMsg := Message{Type: "error", Payload: json.RawMessage(errPayload)}
-		data, _ := json.Marshal(errMsg)
-		select {
-		case c.send <- data:
-		default:
-		}
+		c.sendError("you are banned from this room")
 		log.Printf("Client %s banned from room %s", c.id, roomName)
 		return
 	}
@@ -204,8 +208,18 @@ func (c *Client) handleJoin(msg Message) {
 	room.Clients[c.id] = c
 	room.mu.Unlock()
 
-	log.Printf("Client %s joined room %s (key: %s)", c.id, roomName, room.Key)
+	log.Printf("Client %s (%s) joined room %s", c.id, c.name, roomName)
 	room.broadcastPeerList()
+}
+
+func (c *Client) sendError(msg string) {
+	payload, _ := json.Marshal(map[string]string{"error": msg})
+	m := Message{Type: "error", Payload: json.RawMessage(payload)}
+	data, _ := json.Marshal(m)
+	select {
+	case c.send <- data:
+	default:
+	}
 }
 
 func (c *Client) handleLeave() {

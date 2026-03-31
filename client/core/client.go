@@ -469,6 +469,16 @@ func (c *Client) handleMessage(msg Message) {
 		c.handleRelayData(msg)
 	case "stun_info":
 		c.handleStunInfo(msg)
+	case "error":
+		var errInfo struct {
+			Error string `json:"error"`
+		}
+		if msg.Payload != nil {
+			json.Unmarshal(msg.Payload, &errInfo)
+		}
+		if errInfo.Error != "" {
+			c.emit(EventError, LogEvent{Level: "error", Message: "Server: " + errInfo.Error})
+		}
 	}
 }
 

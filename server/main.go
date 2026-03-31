@@ -27,8 +27,9 @@ var (
 	relayManager *RelayManager
 	authToken    string
 	sessions     sync.Map
-	loginLimiter = newRateLimiter(5, time.Minute) // 5 attempts per minute per IP
+	loginLimiter = newRateLimiter(5, time.Minute)  // 5 login attempts per minute per IP
 	wsLimiter    = newRateLimiter(20, time.Minute) // 20 new WS connections per minute per IP
+	joinLimiter  = newRateLimiter(10, time.Minute) // 10 room join attempts per minute per client
 )
 
 // --- Simple rate limiter ---

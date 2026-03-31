@@ -25,7 +25,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o "$BUILD_DIR/n
 # GUI Client
 echo "  gui-client (darwin/arm64, windows/amd64)"
 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o "$BUILD_DIR/stun_max-client-darwin-arm64" ./client/
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o "$BUILD_DIR/stun_max-client-windows-amd64.exe" ./client/
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w -H windowsgui" -o "$BUILD_DIR/stun_max-client-windows-amd64.exe" ./client/
 
 # CLI Client
 echo "  cli-client (darwin/arm64, windows/amd64, linux/amd64)"

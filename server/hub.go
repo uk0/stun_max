@@ -84,6 +84,29 @@ func roomKey(name, passwordHash string) string {
 	return name + ":" + passwordHash
 }
 
+// findRoomByName checks if a room with the given name exists and password matches.
+// Returns the room if found and password correct, or (nil, reason) if not.
+func (h *Hub) findRoomByName(name, passwordHash string) (*Room, string) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	// Look for any room with this display name
+	found := false
+	for _, room := range h.rooms {
+		if room.Name == name {
+			found = true
+			// Check password matches
+			if room.PasswordHash == passwordHash {
+				return room, ""
+			}
+		}
+	}
+	if found {
+		return nil, "incorrect room password"
+	}
+	return nil, "room does not exist"
+}
+
 func (h *Hub) getOrCreateRoom(name, passwordHash string) *Room {
 	key := roomKey(name, passwordHash)
 
