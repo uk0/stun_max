@@ -54,6 +54,18 @@ func (s *ConnectScreen) init() {
 	}
 }
 
+// ReloadConfig refills the form from saved config (called after disconnect).
+func (s *ConnectScreen) ReloadConfig() {
+	if cfg := LoadConfig(); cfg != nil {
+		if cfg.ServerURL != "" {
+			s.ServerEditor.SetText(cfg.ServerURL)
+		}
+		s.RoomEditor.SetText(cfg.Room)
+		s.PasswordEditor.SetText(cfg.Password)
+		s.NameEditor.SetText(cfg.Name)
+	}
+}
+
 // Layout renders the connect screen.
 func (s *ConnectScreen) Layout(gtx layout.Context, th *material.Theme, a *App) layout.Dimensions {
 	s.init()

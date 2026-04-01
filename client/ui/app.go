@@ -374,6 +374,9 @@ func (a *App) DoDisconnect() {
 	a.Peers = nil
 	a.Forwards = nil
 	a.mu.Unlock()
+
+	// Reload saved config into connect form
+	a.Connect.ReloadConfig()
 }
 
 // SaveForwardsToConfig persists the current forward rules to disk.
