@@ -1,73 +1,85 @@
-# STUN Max
+<p align="center">
+  <img src="img/logo.png" width="128" alt="STUN Max Logo">
+</p>
 
-![img.png](img/img_3.png)
+<h1 align="center">STUN Max</h1>
 
+<p align="center">
+  P2P TCP tunnel with STUN hole punching and automatic server relay fallback.<br>
+  Cross-platform GUI + CLI. Zero configuration networking.
+</p>
 
-P2P TCP tunnel with STUN hole punching and automatic server relay fallback. Cross-platform GUI + CLI.
+---
+
+## Features
+
+- **P2P Direct Connection** — STUN hole punch → Direct TCP upgrade, data never touches the server
+- **Auto Relay Fallback** — If P2P fails after 5 attempts, seamlessly falls back to server relay
+- **LAN Auto-Detection** — Same public IP peers connect via local address (zero latency)
+- **Port Forwarding** — Map any remote peer's `host:port` to your localhost
+- **Auto Reconnect** — Network changes trigger automatic reconnect (3s interval, infinite retry)
+- **Room-Based Access** — Password-protected rooms, created via admin dashboard only
+- **GUI + CLI** — Gio UI desktop app (Windows/Mac) + readline CLI with tab completion
+- **NAT Diagnostic** — Built-in `natcheck` tool detects NAT type and punch success probability
+- **Windows Tools** — One-click RDP enable (localhost-only firewall), auto-login, admin autostart
+- **Config Persistence** — Connection, forwards, STUN servers saved and restored across restarts
+- **Blacklist** — Ban clients per room from the admin dashboard
+- **Traffic Stats** — Real-time upload/download speed and total bytes per forward
+- **Self-Hosted STUN** — Lightweight STUN server included for China/restricted networks
 
 ## Architecture
 
 ```
 ┌──────────┐    1. UDP hole punch      ┌──────────┐
-│ Client A │◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ── ─►│ Client B │
-│ (GUI/CLI)│    2. Direct TCP upgrade  │ (GUI/CLI)│
-│          │◄═════════════════════════►│          │
-└────┬─────┘    (reliable, fast)       └────┬─────┘
-     │                                      │
-     │  WebSocket (signaling + relay)       │
-     └──────────────┬───────────────────────┘
-                    │
-             ┌──────┴──────┐
-             │   Server    │
-             │ Signal+Relay│
-             │ + Dashboard │
-             └─────────────┘
+│ Client A │◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ►│ Client B │
+│ (GUI/CLI)│    2. Direct TCP upgrade   │ (GUI/CLI)│
+│          │◄══════════════════════════►│          │
+└────┬─────┘    (reliable, fast)        └────┬─────┘
+     │                                       │
+     │   WebSocket (signaling + relay)       │
+     └───────────────┬───────────────────────┘
+                     │
+              ┌──────┴──────┐
+              │   Server    │
+              │ Signal+Relay│
+              │ + Dashboard │
+              └─────────────┘
 ```
 
-**How it works:**
-1. Both clients connect to the signal server via WebSocket
-2. STUN discovery finds each client's public IP:port
-3. UDP hole punch establishes NAT traversal
-4. Direct TCP connection upgrades the punched hole (reliable + ordered)
-5. Tunnel data flows over Direct TCP (P2P) — no server in the path
-6. If punch fails → automatic fallback to WebSocket relay through server
+**Connection flow:**
 
-**LAN optimization:** Clients on the same public IP auto-detect and connect via local address directly.
+1. Both clients connect to signal server via WebSocket
+2. STUN discovery finds public IP:port (supports custom/self-hosted STUN)
+3. UDP hole punch with Birthday Attack + port prediction
+4. Direct TCP upgrade over the punched hole (reliable, ordered)
+5. Tunnel data flows P2P — server not in the data path
+6. If punch fails 5 times → auto relay, background retry continues
+7. If P2P later succeeds → auto upgrade back from relay
 
 ## Screenshots
 
-![img.png](img/img_1.png)
-
-![img.png](img/img.png)
+| Dashboard | GUI Client |
+|-----------|------------|
+| ![Dashboard](img/img_2.png) | ![Client](img/img_1.png) |
 
 ## Quick Start
 
 ### 1. Deploy Server
 
-#### Quick Run (test)
-
 ```bash
 ./build.sh
-./build/stun_max-server-linux-amd64 --addr :8080 --web-dir ./build/web
-# Password printed to console
+
+# Upload to your server
+scp build/stun_max-server-linux-amd64 root@SERVER:/usr/local/bin/stun_max-server
+scp build/stun_max-stunserver-linux-amd64 root@SERVER:/usr/local/bin/stun_max-stunserver
+ssh root@SERVER "mkdir -p /opt/stun_max/web"
+scp -r build/web/* root@SERVER:/opt/stun_max/web/
 ```
 
-#### Production Deploy (systemd)
+Create systemd services:
 
 ```bash
-# Build on local machine
-./build.sh
-
-# Upload to server
-scp build/stun_max-server-linux-amd64 root@YOUR_SERVER:/usr/local/bin/stun_max-server
-scp build/stun_max-stunserver-linux-amd64 root@YOUR_SERVER:/usr/local/bin/stun_max-stunserver
-ssh root@YOUR_SERVER "mkdir -p /opt/stun_max/web"
-scp -r build/web/* root@YOUR_SERVER:/opt/stun_max/web/
-```
-
-Create systemd service:
-
-```bash
+# Signal Server
 cat > /etc/systemd/system/stun-max.service << 'EOF'
 [Unit]
 Description=STUN Max Signal Server
@@ -76,7 +88,6 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/stun_max-server --addr :8080 --web-dir /opt/stun_max/web
-WorkingDirectory=/opt/stun_max
 Restart=always
 RestartSec=3
 LimitNOFILE=65536
@@ -85,162 +96,113 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable stun-max
-systemctl start stun-max
-```
-
-View the auto-generated dashboard password:
-
-```bash
-journalctl -u stun-max | grep Password
-```
-
-Optional: deploy STUN server (improves hole punch, especially in China):
-
-```bash
+# STUN Server (optional, recommended for China)
 cat > /etc/systemd/system/stun-max-stun.service << 'EOF'
 [Unit]
-Description=STUN Max - STUN Server
+Description=STUN Max STUN Server
 After=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/stun_max-stunserver --addr :3478
 Restart=always
-RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable stun-max-stun
-systemctl start stun-max-stun
+systemctl enable --now stun-max stun-max-stun
 ```
 
-#### Firewall
-
-| Port | Protocol | Service |
-|------|----------|---------|
-| 8080 | TCP | Signal server (WebSocket + Dashboard) |
-| 3478 | UDP | STUN server (optional) |
+Get the auto-generated dashboard password:
 
 ```bash
-ufw allow 8080/tcp
-ufw allow 3478/udp
+journalctl -u stun-max | grep Password
 ```
 
-#### Create a Room
+**Firewall:** Open TCP `8080` and UDP `3478`.
 
-Rooms must be created via the dashboard before clients can join.
+### 2. Create a Room
 
-Open `http://YOUR_SERVER:8080`, login with the password, create a room with name + password.
+Open `http://SERVER:8080`, login, create a room with name + password.
 
-![img.png](img/img_2.png)
+Rooms persist until explicitly deleted — they survive client disconnects and server restarts.
 
-### 2. Connect Clients
+### 3. Connect
 
-**GUI** (Windows/Mac):
-```
-stun_max-client-windows-amd64.exe
-stun_max-client-darwin-arm64
-```
-Enter server URL (`ws://YOUR_SERVER:8080/ws`), room name, password, your name → Connect.
+**GUI (Windows/Mac):**
 
-Connection config is saved automatically and restored on next launch.
+Run `stun_max-client-windows-amd64.exe` or `stun_max-client-darwin-arm64`, fill in server URL, room, password, name → Connect.
 
-**CLI**:
-```bash
-./stun_max-cli --server ws://YOUR_SERVER:8080/ws --room myroom --password secret --name laptop
-```
-
-### 3. Port Forward
-
-Once two clients are in the same room:
-
-```
-# GUI: Forwards tab → enter peer name, host:port, click Start
-# CLI:
-> forward peer-name 127.0.0.1:8080
-> forward peer-name 192.168.1.100:3389 3389
-> forwards    # list active
-> unforward 3389
-```
-
-Forwards have Stop (pause, keeps config) and Delete (remove permanently).
-Saved forwards auto-restore on reconnect.
-
-### 4. NAT Diagnostic
+**CLI:**
 
 ```bash
-./natcheck
+./stun_max-cli --server ws://SERVER:8080/ws --room myroom --password secret --name laptop
 ```
 
-Shows NAT type, hole punch success probability, peer compatibility matrix.
+### 4. Forward Ports
+
+```bash
+# Forward peer's port to local
+> forward peer-name 127.0.0.1:3389
+> forward peer-name 192.168.1.100:8080 9090
+
+# Manage
+> forwards          # list with traffic stats
+> unforward 3389    # stop
+```
 
 ## Build
 
 ```bash
-# All platforms
-./build.sh
-
-# Single target
-go build ./server/                           # server
-go build ./client/                           # GUI client
-go build -tags cli ./client/                 # CLI client
-go build ./tools/natcheck/                   # NAT checker
-go build ./tools/stunserver/                 # STUN server
+./build.sh                                    # all platforms
+go build ./server/                            # server only
+go build ./client/                            # GUI client
+go build -tags cli ./client/                  # CLI client
+go build ./tools/natcheck/                    # NAT diagnostic
+go build ./tools/stunserver/                  # STUN server
 ```
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `peers` | List peers with P2P/RELAY status |
-| `forward <peer> <host:port> [local]` | Forward remote port to local |
-| `unforward <port>` | Stop a forward |
-| `forwards` | List active forwards with traffic stats |
-| `stun` | Show STUN/P2P status |
-| `speedtest <peer>` | Run speed test |
-| `help` | Show help |
+| `peers` | List peers with P2P/RELAY mode |
+| `forward <peer> <host:port> [local]` | Forward remote port |
+| `unforward <port>` | Stop forward |
+| `forwards` | List forwards with traffic stats |
+| `stun` | STUN/P2P connection details |
+| `speedtest <peer>` | Bandwidth test |
+| `help` | All commands |
 | `quit` | Disconnect |
 
-Tab completion for commands, peer names, and port numbers.
+Tab completion for commands, peer names, and ports.
 
 ## GUI Tabs
 
-| Tab | Features |
-|-----|----------|
-| Peers | Live peer list, P2P/RELAY status, STUN endpoints |
-| Forwards | Create/stop/delete forwards, real-time traffic (bytes + rate), relay fallback |
-| Speed Test | Upload/download speed test between peers |
-| Tools | Windows RDP: enable/disable 3389 (localhost-only firewall), password management |
-| Settings | Allow incoming forwards, local-only mode, STUN server selector, autostart (Windows) |
-| Logs | Scrollable event log |
-
-## Server Dashboard
-
-Web dashboard at `http://SERVER:PORT` (password protected):
-- Room management: create, delete
-- Peer monitoring: status, endpoints, traffic per room
-- Blacklist: ban/unban clients per room
-- Traffic statistics and active connection count
+| Tab | Description |
+|-----|-------------|
+| **Peers** | Peer list with P2P/RELAY badges, STUN endpoints, self mode display |
+| **Forwards** | Create/stop/delete forwards, live traffic (bytes + speed), relay fallback |
+| **Speed Test** | Upload/download bandwidth test between peers |
+| **Tools** | Windows RDP enable (localhost-only), password management |
+| **Settings** | Forward control, STUN server selector, autostart, auto-connect, auto-login |
+| **Logs** | Scrollable event log |
 
 ## Security
 
 | Feature | Detail |
 |---------|--------|
-| Room isolation | Clients can only communicate within the same room |
-| Room auth | Rooms created via dashboard only; password SHA-256 hashed |
-| Relay isolation | Server verifies sender and receiver are in the same room |
-| Rate limiting | Login: 5/min/IP, WebSocket: 20/min/IP, Join: 10/min/client |
-| Connection limit | Global max connections (default 5000, configurable) |
+| Room isolation | Relay verifies sender and receiver in same room |
+| Room auth | Dashboard-only creation, SHA-256 password hash |
+| Rate limiting | Login 5/min, WebSocket 20/min, Join 10/min per IP/client |
+| Connection limit | Global max (default 5000, `--max-connections`) |
 | Session expiry | Dashboard tokens expire after 24 hours |
-| Blacklist | Ban clients per room via dashboard |
-| Forward control | Per-client allow/deny incoming forwards + local-only mode |
-| RDP security | Firewall restricts 3389 to 127.0.0.1 only |
-| IP handling | X-Forwarded-For not trusted (prevents rate limit bypass) |
+| Blacklist | Ban/unban clients per room |
+| Forward control | Per-client allow/deny + local-only mode |
+| RDP firewall | Port 3389 restricted to 127.0.0.1 only |
+| IP validation | X-Forwarded-For not trusted |
 
 ## Server Flags
 
@@ -248,54 +210,57 @@ Web dashboard at `http://SERVER:PORT` (password protected):
 |------|---------|-------------|
 | `--addr` | `:8080` | Listen address |
 | `--web-password` | (random) | Dashboard password |
-| `--web-dir` | `../web` | Web static files path |
+| `--web-dir` | `../web` | Static files path |
 | `--max-connections` | `5000` | Max WebSocket connections |
 
 ## Client Flags (CLI)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--server` | `ws://localhost:8080/ws` | Server WebSocket URL |
+| `--server` | `ws://localhost:8080/ws` | Server URL |
 | `--room` | (required) | Room name |
 | `--password` | | Room password |
 | `--name` | (hostname) | Display name |
-| `--stun` | `stun.cloudflare.com:3478` | STUN server(s), comma-separated |
-| `--no-stun` | `false` | Disable STUN, relay only |
-| `-v` | `false` | Verbose logging |
+| `--stun` | `stun.cloudflare.com:3478` | STUN servers (comma-separated) |
+| `--no-stun` | `false` | Relay only |
+| `-v` | `false` | Verbose |
 
 ## Project Structure
 
 ```
-server/
-  main.go          HTTP/WS server, auth, rate limiting, connection limits
-  hub.go           Room management, peer tracking, blacklist
-  client.go        WebSocket message handling, room join validation
-  relay.go         Data relay with room isolation check
-  stats.go         Traffic statistics
-client/
-  core/
-    client.go      Connection, signaling, peer management
-    tunnel.go      TCP port forwarding (Direct TCP + relay fallback)
-    stun.go        STUN discovery, UDP hole punch, Direct TCP upgrade
-    crypto.go      X25519 ECDH + AES-256-GCM (key exchange)
-    speedtest.go   Peer-to-peer speed testing
-    types.go       Protocol types
-    events.go      Event system for UI
-  ui/
-    app.go         Gio UI app, event consumer
-    connect.go     Connection screen with STUN config
-    dashboard.go   Tab navigation
-    peers.go       Peer list panel
-    forwards.go    Forward management (start/stop/delete, traffic stats)
-    speedtest.go   Speed test panel
-    tools.go       Windows RDP tools
-    settings.go    Access control, STUN server selector, autostart
-    config.go      Config persistence
-    logs.go        Log viewer
-  main.go          GUI entry point (Gio)
-  main_cli.go      CLI entry point (readline, tab completion)
-web/               Admin dashboard (HTML/JS/CSS)
-tools/
-  natcheck/        NAT type diagnostic tool
-  stunserver/      Lightweight STUN server
+server/              Signal + relay + dashboard
+  main.go            HTTP/WS, auth, rate limiting, connection limits
+  hub.go             Rooms, peers, blacklist
+  client.go          Message routing, join validation
+  relay.go           Data relay with room isolation
+  stats.go           Traffic statistics
+
+client/core/         Networking (shared by GUI + CLI)
+  client.go          Connection, reconnect, signaling
+  tunnel.go          Port forwarding, Direct TCP + relay
+  stun.go            STUN discovery, hole punch, TCP upgrade
+  crypto.go          X25519 + AES-256-GCM key exchange
+  speedtest.go       Bandwidth testing
+  types.go           Protocol types
+  events.go          Event system
+
+client/ui/           Gio UI desktop app
+  app.go             Window, events, auto-connect
+  connect.go         Login screen
+  dashboard.go       Tab navigation
+  peers.go           Peer list
+  forwards.go        Forward management
+  speedtest.go       Speed test
+  tools.go           Windows RDP
+  settings.go        All settings + STUN selector
+  config.go          Config persistence
+  autostart_*.go     Windows Task Scheduler / registry
+
+web/                 Admin dashboard (HTML/JS/CSS)
+tools/natcheck/      NAT type diagnostic
+tools/stunserver/    Self-hosted STUN server
 ```
+
+## License
+
+MIT
