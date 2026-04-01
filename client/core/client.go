@@ -532,11 +532,13 @@ func (c *Client) reconnect() bool {
 // resetP2PState clears all stale P2P connections after a reconnect.
 func (c *Client) resetP2PState() {
 	// Close old UDP socket
+	c.connMu.Lock()
 	if c.udpConn != nil {
 		c.udpConn.Close()
 		c.udpConn = nil
 	}
 	c.publicAddr = ""
+	c.connMu.Unlock()
 
 	// Reset all peer connections to "connecting"
 	c.peerConnsMu.Lock()

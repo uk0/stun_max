@@ -225,8 +225,11 @@ func (c *Client) sendStunInfo(to string) {
 	}
 	localAddr := getLocalIP()
 	var localUDP string
-	if localAddr != "" && c.udpConn != nil {
-		localPort := c.udpConn.LocalAddr().(*net.UDPAddr).Port
+	c.connMu.Lock()
+	udp := c.udpConn
+	c.connMu.Unlock()
+	if localAddr != "" && udp != nil {
+		localPort := udp.LocalAddr().(*net.UDPAddr).Port
 		localUDP = fmt.Sprintf("%s:%d", localAddr, localPort)
 	}
 	payload, _ := json.Marshal(map[string]string{
@@ -321,7 +324,11 @@ func (c *Client) attemptHolePunch(peerID string, isLAN bool) {
 	pc := c.peerConns[peerID]
 	c.peerConnsMu.RUnlock()
 
-	if pc == nil || pc.UDPAddr == nil || c.udpConn == nil {
+	c.connMu.Lock()
+	udp := c.udpConn
+	c.connMu.Unlock()
+
+	if pc == nil || pc.UDPAddr == nil || udp == nil {
 		return
 	}
 
@@ -346,7 +353,7 @@ func (c *Client) attemptHolePunch(peerID string, isLAN bool) {
 			return
 		default:
 		}
-		c.udpConn.WriteToUDP(punch, addr)
+		udp.WriteToUDP(punch, addr)
 		time.Sleep(25 * time.Millisecond)
 	}
 
@@ -398,7 +405,7 @@ func (c *Client) attemptHolePunch(peerID string, isLAN bool) {
 			continue
 		}
 		predictedAddr := &net.UDPAddr{IP: addr.IP, Port: predictedPort}
-		c.udpConn.WriteToUDP(punch, predictedAddr)
+		udp.WriteToUDP(punch, predictedAddr)
 	}
 }
 
@@ -446,13 +453,15 @@ func (c *Client) sendKeyExchange(peerID string) {
 	c.peerConnsMu.RLock()
 	pc := c.peerConns[peerID]
 	c.peerConnsMu.RUnlock()
-	if pc == nil || pc.UDPAddr == nil || pc.Crypto == nil || c.udpConn == nil {
+	c.connMu.Lock()
+	udp := c.udpConn
+	c.connMu.Unlock()
+	if pc == nil || pc.UDPAddr == nil || pc.Crypto == nil || udp == nil {
 		return
 	}
 
-	// KEY:<myID>:<32-byte-pubkey>
 	msg := append([]byte("KEY:"+c.MyID+":"), pc.Crypto.PubKey...)
-	c.udpConn.WriteToUDP(msg, pc.UDPAddr)
+	udp.WriteToUDP(msg, pc.UDPAddr)
 }
 
 // handleKeyExchange processes an incoming public key and derives the shared secret.
@@ -492,7 +501,12 @@ func (c *Client) handleKeyExchange(peerID string, peerPubKey []byte, addr *net.U
 	pubKey := pc.Crypto.PubKey
 	c.peerConnsMu.RUnlock()
 	ack := append([]byte("KEY_ACK:"+c.MyID+":"), pubKey...)
-	c.udpConn.WriteToUDP(ack, addr)
+	c.connMu.Lock()
+	udp := c.udpConn
+	c.connMu.Unlock()
+	if udp != nil {
+		udp.WriteToUDP(ack, addr)
+	}
 }
 
 func (c *Client) udpReadLoop() {
@@ -504,8 +518,15 @@ func (c *Client) udpReadLoop() {
 			return
 		default:
 		}
-		c.udpConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		n, addr, err := c.udpConn.ReadFromUDP(buf)
+		// Check if udpConn was closed (e.g. by resetP2PState during reconnect)
+		c.connMu.Lock()
+		conn := c.udpConn
+		c.connMu.Unlock()
+		if conn == nil {
+			return // socket closed, exit this goroutine
+		}
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			// Timeout is normal — just loop and check c.done
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -530,7 +551,7 @@ func (c *Client) udpReadLoop() {
 		if bytes.HasPrefix(data, prefixPunch) && !bytes.HasPrefix(data, prefixPunchAck) {
 			peerID := string(data[len(prefixPunch):])
 			c.onHolePunchSuccess(peerID, addr)
-			c.udpConn.WriteToUDP(append([]byte("PUNCH_ACK:"), []byte(c.MyID)...), addr)
+			conn.WriteToUDP(append([]byte("PUNCH_ACK:"), []byte(c.MyID)...), addr)
 			continue
 		}
 		if bytes.HasPrefix(data, prefixPunchAck) {
@@ -678,11 +699,13 @@ func (c *Client) attemptDirectTCP(peerID string, addr *net.UDPAddr) {
 
 // startDirectTCPListener listens for incoming direct TCP connections from peers.
 func (c *Client) startDirectTCPListener() {
-	if c.udpConn == nil {
+	c.connMu.Lock()
+	udp := c.udpConn
+	c.connMu.Unlock()
+	if udp == nil {
 		return
 	}
-	// Listen on UDP port + 1
-	localPort := c.udpConn.LocalAddr().(*net.UDPAddr).Port + 1
+	localPort := udp.LocalAddr().(*net.UDPAddr).Port + 1
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", localPort))
 	if err != nil {
 		if c.verbose {
@@ -758,9 +781,14 @@ func (c *Client) startRetryLoop() {
 
 		case <-keepaliveTicker.C:
 			c.peerConnsMu.RLock()
-			for _, pc := range c.peerConns {
-				if pc.Mode == "direct" && pc.UDPAddr != nil && c.udpConn != nil {
-					c.udpConn.WriteToUDP([]byte("PING"), pc.UDPAddr)
+			c.connMu.Lock()
+			udp := c.udpConn
+			c.connMu.Unlock()
+			if udp != nil {
+				for _, pc := range c.peerConns {
+					if pc.Mode == "direct" && pc.UDPAddr != nil {
+						udp.WriteToUDP([]byte("PING"), pc.UDPAddr)
+					}
 				}
 			}
 			c.peerConnsMu.RUnlock()
