@@ -2,6 +2,7 @@ package ui
 
 import (
 	"image"
+	"image/color"
 	"strings"
 
 	"gioui.org/layout"
@@ -27,12 +28,19 @@ type SettingsPanel struct {
 	LocalOnly    widget.Bool
 	Autostart    widget.Bool
 	AutoConnect  widget.Bool
+	AutoLogin    widget.Bool
+
+	// Auto login
+	AutoLoginPassEditor widget.Editor
+	AutoLoginSaveBtn    widget.Clickable
+	AutoLoginUser       string
+	AutoLoginMsg        string
 
 	// STUN server state
-	STUNToggles      map[string]*widget.Bool // public server toggles
+	STUNToggles      map[string]*widget.Bool
 	CustomSTUNEditor widget.Editor
 	AddSTUNBtn       widget.Clickable
-	customSTUNList   []string // user-added custom servers
+	customSTUNList   []string
 
 	inited bool
 }
@@ -48,6 +56,13 @@ func (s *SettingsPanel) init(a *App) {
 	if cfg := LoadConfig(); cfg != nil {
 		s.AutoConnect.Value = cfg.AutoConnect
 	}
+
+	// Auto login
+	s.AutoLoginPassEditor.SingleLine = true
+	s.AutoLoginPassEditor.Mask = '*'
+	enabled, user := GetAutoLogin()
+	s.AutoLogin.Value = enabled
+	s.AutoLoginUser = user
 
 	s.CustomSTUNEditor.SingleLine = true
 	s.STUNToggles = make(map[string]*widget.Bool)
@@ -124,6 +139,31 @@ func (s *SettingsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 			SaveConfig(cfg)
 		}
 	}
+	if s.AutoLogin.Update(gtx) {
+		if !s.AutoLogin.Value {
+			// Disable auto login
+			SetAutoLogin("", "")
+			s.AutoLoginMsg = "Auto login disabled"
+			s.AutoLoginUser = ""
+		}
+		// Enable requires password — handled by Save button
+	}
+	if s.AutoLoginSaveBtn.Clicked(gtx) {
+		pw := strings.TrimSpace(s.AutoLoginPassEditor.Text())
+		if pw == "" {
+			s.AutoLoginMsg = "Enter your Windows password"
+		} else {
+			user := GetCurrentUsername()
+			if err := SetAutoLogin(user, pw); err != nil {
+				s.AutoLoginMsg = "Failed: " + err.Error()
+			} else {
+				s.AutoLogin.Value = true
+				s.AutoLoginUser = user
+				s.AutoLoginMsg = "Auto login enabled for " + user
+				s.AutoLoginPassEditor.SetText("")
+			}
+		}
+	}
 
 	// Handle STUN toggle changes
 	for _, b := range s.STUNToggles {
@@ -187,9 +227,122 @@ func (s *SettingsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 				)
 			})
 		}),
+		// Auto Login (Windows only)
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if !AutoLoginSupported() {
+				return layout.Dimensions{}
+			}
+			return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return s.layoutAutoLoginCard(gtx, th)
+			})
+		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return s.layoutSTUNCard(gtx, th)
+			})
+		}),
+	)
+}
+
+func (s *SettingsPanel) layoutAutoLoginCard(gtx layout.Context, th *material.Theme) layout.Dimensions {
+	return layout.Stack{}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
+			paint.FillShape(gtx.Ops, CardColor, rr.Op(gtx.Ops))
+			return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Min.Y)}
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			return layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					// Title + toggle
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Alignment: layout.Middle, Spacing: layout.SpaceBetween}.Layout(gtx,
+							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Body1(th, "Windows Auto Login")
+										lbl.Color = TextColor
+										return lbl.Layout(gtx)
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											desc := "Skip the Windows login screen on boot. Enter your Windows password below to enable."
+											if s.AutoLogin.Value {
+												desc = "Auto login enabled for user: " + s.AutoLoginUser
+											}
+											lbl := material.Caption(th, desc)
+											lbl.Color = DimColor
+											return lbl.Layout(gtx)
+										})
+									}),
+								)
+							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return layout.Inset{Left: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									sw := material.Switch(th, &s.AutoLogin, "Auto Login")
+									sw.Color.Enabled = AccentColor
+									sw.Color.Disabled = DimColor
+									return sw.Layout(gtx)
+								})
+							}),
+						)
+					}),
+					// Password input + Save button (only when not enabled)
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if s.AutoLogin.Value {
+							return layout.Dimensions{}
+						}
+						return layout.Inset{Top: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									lbl := material.Body2(th, "Password: ")
+									lbl.Color = DimColor
+									return lbl.Layout(gtx)
+								}),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									gtx.Constraints.Max.X = gtx.Dp(unit.Dp(200))
+									return layout.Stack{}.Layout(gtx,
+										layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+											rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(4)))
+											paint.FillShape(gtx.Ops, InputBg, rr.Op(gtx.Ops))
+											return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Min.Y)}
+										}),
+										layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+											return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+												ed := material.Editor(th, &s.AutoLoginPassEditor, "Windows password")
+												ed.Color = TextColor
+												ed.HintColor = DimColor
+												return ed.Layout(gtx)
+											})
+										}),
+									)
+								}),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									return layout.Inset{Left: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										btn := material.Button(th, &s.AutoLoginSaveBtn, "Enable")
+										btn.Background = SuccessColor
+										btn.Color = color.NRGBA{A: 255}
+										btn.CornerRadius = unit.Dp(4)
+										btn.TextSize = unit.Sp(13)
+										btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(14), Right: unit.Dp(14)}
+										return btn.Layout(gtx)
+									})
+								}),
+							)
+						})
+					}),
+					// Status message
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if s.AutoLoginMsg == "" {
+							return layout.Dimensions{}
+						}
+						return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Caption(th, s.AutoLoginMsg)
+							lbl.Color = SuccessColor
+							return lbl.Layout(gtx)
+						})
+					}),
+				)
 			})
 		}),
 	)
