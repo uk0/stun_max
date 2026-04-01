@@ -440,31 +440,36 @@ func (c *Client) readLoop() {
 }
 
 // reconnect attempts to re-establish the WebSocket connection and rejoin the room.
-// Tries with exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (max), up to 5 minutes total.
+// Fixed 3-second interval, retries indefinitely until success or c.done is closed.
 func (c *Client) reconnect() bool {
-	backoff := 1 * time.Second
-	maxBackoff := 30 * time.Second
-	deadline := time.Now().Add(5 * time.Minute)
-
-	for attempt := 1; time.Now().Before(deadline); attempt++ {
+	for attempt := 1; ; attempt++ {
 		select {
 		case <-c.done:
 			return false
 		default:
 		}
 
-		c.emit(EventReconnecting, LogEvent{Level: "info", Message: fmt.Sprintf("Reconnect attempt %d (next in %s)...", attempt, backoff)})
+		c.emit(EventReconnecting, LogEvent{Level: "info", Message: fmt.Sprintf("Reconnect attempt %d...", attempt)})
 
-		time.Sleep(backoff)
+		time.Sleep(3 * time.Second)
+
+		select {
+		case <-c.done:
+			return false
+		default:
+		}
+
+		// Use saved config for connection parameters
+		serverURL := c.Config.ServerURL
+		room := c.room
+		passHash := c.passwordHash
+		name := c.name
 
 		// Try to connect
 		dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-		conn, _, err := dialer.Dial(c.Config.ServerURL, nil)
+		conn, _, err := dialer.Dial(serverURL, nil)
 		if err != nil {
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
+			c.emit(EventLog, LogEvent{Level: "warn", Message: fmt.Sprintf("Reconnect failed: %v", err)})
 			continue
 		}
 
@@ -495,15 +500,15 @@ func (c *Client) reconnect() bool {
 			oldConn.Close()
 		}
 
-		// Rejoin room
+		// Rejoin room with correct credentials
 		joinPayload, _ := json.Marshal(map[string]string{
-			"room":          c.room,
-			"password_hash": c.passwordHash,
-			"name":          c.name,
+			"room":          room,
+			"password_hash": passHash,
+			"name":          name,
 		})
 		c.sendMsg(Message{
 			Type:    "join",
-			Room:    c.room,
+			Room:    room,
 			Payload: json.RawMessage(joinPayload),
 		})
 
@@ -515,8 +520,6 @@ func (c *Client) reconnect() bool {
 		c.emit(EventReconnected, LogEvent{Level: "info", Message: fmt.Sprintf("Reconnected (ID: %s)", c.MyID)})
 		return true
 	}
-
-	return false
 }
 
 func splitMessages(data []byte) [][]byte {
