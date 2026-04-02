@@ -18,6 +18,7 @@ type TunDevice struct {
 	virtualIP net.IP
 	peerIP    net.IP
 	subnet    *net.IPNet
+	routes    []string // user-specified subnets routed through this tunnel
 	peerID    string
 	peerName  string
 	bytesUp   int64
@@ -39,7 +40,8 @@ func nextTunIP() (string, string) {
 }
 
 // StartTun initiates a TUN VPN with the given peer.
-func (c *Client) StartTun(peerID string) error {
+// routes: subnets to route through the peer, e.g. ["10.88.51.0/24"]
+func (c *Client) StartTun(peerID string, routes []string) error {
 	fullID, err := c.resolvePeerID(peerID)
 	if err != nil {
 		return err
@@ -55,11 +57,11 @@ func (c *Client) StartTun(peerID string) error {
 	myIP, peerIP := nextTunIP()
 	subnet := "10.7.0.0/24"
 
-	// Send setup to peer
 	err = c.sendRelay(fullID, "tun_setup", TunSetup{
-		VirtualIP: peerIP, // peer gets peerIP
-		PeerIP:    myIP,   // peer's remote is our IP
+		VirtualIP: peerIP,
+		PeerIP:    myIP,
 		Subnet:    subnet,
+		Routes:    routes,
 	})
 	if err != nil {
 		return fmt.Errorf("send tun_setup: %w", err)
@@ -69,6 +71,12 @@ func (c *Client) StartTun(peerID string) error {
 	dev, err := c.createTunDevice(myIP, peerIP, subnet, fullID)
 	if err != nil {
 		return err
+	}
+	dev.routes = routes
+
+	// Add subnet routes on initiator side (A routes subnets through TUN to B)
+	for _, route := range routes {
+		addRoute(dev.ifName, route, peerIP)
 	}
 
 	c.tunMu.Lock()
@@ -115,6 +123,11 @@ func (c *Client) StopTun() error {
 	if dev.iface != nil {
 		dev.iface.Close()
 	}
+	// Remove subnet routes
+	for _, route := range dev.routes {
+		removeRoute(dev.ifName, route)
+	}
+	disableNAT(dev.ifName)
 	removeTunInterface(dev.ifName)
 
 	c.emit(EventTunStopped, LogEvent{Level: "info", Message: "VPN stopped"})
@@ -172,6 +185,13 @@ func (c *Client) handleTunSetup(msg Message) {
 	if err != nil {
 		c.emit(EventTunError, LogEvent{Level: "error", Message: "TUN setup failed: " + err.Error()})
 		return
+	}
+	dev.routes = setup.Routes
+
+	// B side: enable IP forwarding + NAT so A can access B's subnets
+	if len(setup.Routes) > 0 {
+		enableIPForwarding()
+		enableNAT(dev.ifName)
 	}
 
 	peerName := shortID(msg.From)
@@ -324,6 +344,7 @@ func (c *Client) TunStatus() TunInfo {
 		VirtualIP: dev.virtualIP.String(),
 		PeerIP:    dev.peerIP.String(),
 		Subnet:    subnetStr,
+		Routes:    dev.routes,
 		PeerID:    dev.peerID,
 		PeerName:  dev.peerName,
 		BytesUp:   bytesUp,
@@ -350,6 +371,10 @@ func (c *Client) tunCleanup() {
 	if dev.iface != nil {
 		dev.iface.Close()
 	}
+	for _, route := range dev.routes {
+		removeRoute(dev.ifName, route)
+	}
+	disableNAT(dev.ifName)
 	removeTunInterface(dev.ifName)
 }
 

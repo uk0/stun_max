@@ -18,12 +18,13 @@ import (
 
 // VPNPanel manages the TUN VPN UI.
 type VPNPanel struct {
-	PeerEditor widget.Editor
-	StartBtn   widget.Clickable
-	StopBtn    widget.Clickable
-	List       widget.List
-	Error      string
-	inited     bool
+	PeerEditor   widget.Editor
+	RoutesEditor widget.Editor // comma or space separated subnets
+	StartBtn     widget.Clickable
+	StopBtn      widget.Clickable
+	List         widget.List
+	Error        string
+	inited       bool
 }
 
 func (v *VPNPanel) init() {
@@ -32,6 +33,7 @@ func (v *VPNPanel) init() {
 	}
 	v.inited = true
 	v.PeerEditor.SingleLine = true
+	v.RoutesEditor.SingleLine = true
 	v.List.Axis = layout.Vertical
 }
 
@@ -47,12 +49,25 @@ func (v *VPNPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layout
 	// Handle start button
 	if v.StartBtn.Clicked(gtx) && a.Client != nil {
 		peer := strings.TrimSpace(v.PeerEditor.Text())
+		routesStr := strings.TrimSpace(v.RoutesEditor.Text())
 		if peer == "" {
 			v.Error = "Enter a peer ID or name"
 		} else {
 			v.Error = ""
+			// Parse routes: comma or space separated
+			var routes []string
+			if routesStr != "" {
+				for _, r := range strings.FieldsFunc(routesStr, func(c rune) bool {
+					return c == ',' || c == ' '
+				}) {
+					r = strings.TrimSpace(r)
+					if r != "" {
+						routes = append(routes, r)
+					}
+				}
+			}
 			go func() {
-				if err := a.Client.StartTun(peer); err != nil {
+				if err := a.Client.StartTun(peer, routes); err != nil {
 					v.Error = err.Error()
 					a.Window.Invalidate()
 				}
@@ -106,12 +121,14 @@ func (v *VPNPanel) layoutControlCard(gtx layout.Context, th *material.Theme, inf
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-								layout.Flexed(0.5, func(gtx layout.Context) layout.Dimensions {
+								layout.Flexed(0.35, func(gtx layout.Context) layout.Dimensions {
 									return layoutInputField(gtx, th, &v.PeerEditor, "Peer ID or name")
 								}),
-								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									return layout.Spacer{Width: unit.Dp(8)}.Layout(gtx)
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
+									return layoutInputField(gtx, th, &v.RoutesEditor, "Subnets (e.g. 10.88.51.0/24)")
 								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 									if info.Enabled {
 										btn := material.Button(th, &v.StopBtn, "Stop VPN")

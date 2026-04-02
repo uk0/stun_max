@@ -242,14 +242,15 @@ type FileTransferInfo struct {
 
 // TunSetup is exchanged between peers to negotiate VPN.
 type TunSetup struct {
-	VirtualIP string `json:"virtual_ip"` // assigned IP for this peer
-	PeerIP    string `json:"peer_ip"`    // assigned IP for the other peer
-	Subnet    string `json:"subnet"`     // e.g. "10.7.0.0/24"
+	VirtualIP string   `json:"virtual_ip"`
+	PeerIP    string   `json:"peer_ip"`
+	Subnet    string   `json:"subnet"`
+	Routes    []string `json:"routes,omitempty"` // subnets to route, e.g. ["10.88.51.0/24"]
 }
 
 // TunData carries a raw IP packet through the tunnel.
 type TunData struct {
-	Data string `json:"data"` // base64 of compressed IP packet
+	Data string `json:"data"`
 }
 
 // TunTeardown signals VPN shutdown.
@@ -261,6 +262,7 @@ type TunInfo struct {
 	VirtualIP string
 	PeerIP    string
 	Subnet    string
+	Routes    []string
 	PeerID    string
 	PeerName  string
 	BytesUp   int64

@@ -668,7 +668,8 @@ func cmdHop(args []string) {
 
 func cmdVPN(args []string) {
 	if len(args) == 0 {
-		fmt.Printf("%sUsage: vpn <peer> | vpn stop | vpn status%s\n", cRed, cReset)
+		fmt.Printf("%sUsage: vpn <peer> [subnet1 subnet2 ...] | vpn stop | vpn status%s\n", cRed, cReset)
+		fmt.Printf("%sExample: vpn win10 10.88.51.0/24 192.168.1.0/24%s\n", cGray, cReset)
 		return
 	}
 
@@ -689,14 +690,21 @@ func cmdVPN(args []string) {
 		fmt.Printf("  Peer IP:   %s%s%s\n", cGreen, info.PeerIP, cReset)
 		fmt.Printf("  Subnet:    %s\n", info.Subnet)
 		fmt.Printf("  Peer:      %s (%s)\n", info.PeerName, shortID(info.PeerID))
+		if len(info.Routes) > 0 {
+			fmt.Printf("  Routes:    %s\n", strings.Join(info.Routes, ", "))
+		}
 		fmt.Printf("  Traffic:   ↑%s ↓%s\n", fmtBytes(info.BytesUp), fmtBytes(info.BytesDown))
 		if info.RateUp > 0 || info.RateDown > 0 {
 			fmt.Printf("  Rate:      ↑%s/s ↓%s/s\n", fmtBytes(int64(info.RateUp)), fmtBytes(int64(info.RateDown)))
 		}
 		fmt.Println()
 	default:
-		// Treat as peer ID
-		if err := client.StartTun(subcmd); err != nil {
+		// args[0] = peer, args[1:] = subnets to route
+		var routes []string
+		if len(args) > 1 {
+			routes = args[1:]
+		}
+		if err := client.StartTun(subcmd, routes); err != nil {
 			fmt.Printf("%s%v%s\n", cRed, err, cReset)
 		}
 	}
@@ -715,7 +723,8 @@ func printHelp() {
 	fmt.Println("  speedtest <peer>                           Run speed test")
 	fmt.Println("  send <peer> <filepath>                     Send file to peer")
 	fmt.Println("  transfers                                  List active file transfers")
-	fmt.Println("  vpn <peer>                                 Start TUN VPN to peer (needs root)")
+	fmt.Println("  vpn <peer> [subnets...]                    Start VPN, route subnets through peer")
+	fmt.Println("    example: vpn win10 10.88.51.0/24")
 	fmt.Println("  vpn stop                                   Stop active VPN")
 	fmt.Println("  vpn status                                 Show VPN status")
 	fmt.Println("  help                                       Show this help")

@@ -13,6 +13,27 @@ func configureTunInterface(ifName, localIP, peerIP string) error {
 }
 
 func removeTunInterface(ifName string) error {
-	// macOS auto-removes utun on close
 	return nil
+}
+
+func addRoute(ifName, subnet, gateway string) error {
+	return exec.Command("route", "add", "-net", subnet, gateway).Run()
+}
+
+func removeRoute(ifName, subnet string) error {
+	exec.Command("route", "delete", "-net", subnet).Run()
+	return nil
+}
+
+func enableIPForwarding() {
+	exec.Command("sysctl", "-w", "net.inet.ip.forwarding=1").Run()
+}
+
+func enableNAT(ifName string) {
+	exec.Command("bash", "-c",
+		`echo "nat on en0 from `+ifName+`:network to any -> (en0)" | pfctl -ef -`).Run()
+}
+
+func disableNAT(ifName string) {
+	exec.Command("pfctl", "-d").Run()
 }
