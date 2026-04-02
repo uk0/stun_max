@@ -118,40 +118,46 @@ func enableIPForwarding() {
 }
 
 func enableNAT(ifName string) {
-	// Method 1: New-NetNat (Win10/11)
+	// Method 1: New-NetNat (requires Hyper-V on some Win10 versions)
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`Remove-NetNat -Name StunMaxNAT -Confirm:$false -ErrorAction SilentlyContinue`)
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`New-NetNat -Name StunMaxNAT -InternalIPInterfaceAddressPrefix "10.7.0.0/24" -ErrorAction SilentlyContinue`)
-	// Method 2: ICS (Internet Connection Sharing) via COM
-	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
+
+	// Method 2: ICS (Internet Connection Sharing) — most reliable on Win10
+	// Share the physical adapter's internet with the TUN interface
+	runSilent("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
 		`$m = New-Object -ComObject HNetCfg.HNetShare; `+
 			`$conns = $m.EnumEveryConnection; `+
 			`foreach($c in $conns) { `+
-			`  $props = $m.NetConnectionProps($c); `+
-			`  $cfg = $m.INetSharingConfigurationForINetConnection($c); `+
-			`  if($props.Name -eq '`+ifName+`') { `+
-			`    $cfg.EnableSharing(1) `+  // 1 = private
-			`  } elseif($props.Status -eq 2) { `+ // 2 = connected
-			`    $cfg.EnableSharing(0) `+  // 0 = public (share internet)
-			`  } `+
+			`  try { `+
+			`    $props = $m.NetConnectionProps($c); `+
+			`    $cfg = $m.INetSharingConfigurationForINetConnection($c); `+
+			`    if($props.Name -eq '`+ifName+`') { `+
+			`      $cfg.EnableSharing(1) `+ // 1 = private (receives shared internet)
+			`    } elseif($props.Status -eq 2 -and $props.Name -ne '`+ifName+`') { `+
+			`      $cfg.EnableSharing(0) `+ // 0 = public (shares its internet)
+			`    } `+
+			`  } catch {} `+
 			`}`)
-	// Method 3: netsh routing (Windows Server fallback)
-	runSilent("netsh", "routing", "ip", "nat", "install")
-	runSilent("netsh", "routing", "ip", "nat", "add", "interface", ifName, "full")
+
+	// Method 3: Add explicit route for return traffic
+	// Ensure 10.7.0.0/24 replies go back through TUN
+	runSilent("netsh", "interface", "ip", "add", "route", "10.7.0.0/24", ifName)
 }
 
 func disableNAT(ifName string) {
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`Remove-NetNat -Name StunMaxNAT -Confirm:$false -ErrorAction SilentlyContinue`)
-	runSilent("netsh", "routing", "ip", "nat", "delete", "interface", ifName)
 	// Disable ICS
-	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
+	runSilent("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
 		`$m = New-Object -ComObject HNetCfg.HNetShare; `+
 			`$conns = $m.EnumEveryConnection; `+
 			`foreach($c in $conns) { `+
-			`  $cfg = $m.INetSharingConfigurationForINetConnection($c); `+
-			`  $cfg.DisableSharing() `+
+			`  try { `+
+			`    $cfg = $m.INetSharingConfigurationForINetConnection($c); `+
+			`    $cfg.DisableSharing() `+
+			`  } catch {} `+
 			`}`)
 	// Re-enable firewall
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",

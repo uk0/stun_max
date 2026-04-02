@@ -90,13 +90,15 @@ func enableIPForwarding() {
 }
 
 func enableNAT(ifName string) {
-	exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "!", "-o", ifName, "-j", "MASQUERADE").Run()
+	// Masquerade: packets from VPN subnet going out physical interfaces get source NAT
+	// This is the same as what a home router does
+	exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "10.7.0.0/24", "!", "-o", ifName, "-j", "MASQUERADE").Run()
 	exec.Command("iptables", "-A", "FORWARD", "-i", ifName, "-j", "ACCEPT").Run()
 	exec.Command("iptables", "-A", "FORWARD", "-o", ifName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT").Run()
 }
 
 func disableNAT(ifName string) {
-	exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "!", "-o", ifName, "-j", "MASQUERADE").Run()
+	exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", "10.7.0.0/24", "!", "-o", ifName, "-j", "MASQUERADE").Run()
 	exec.Command("iptables", "-D", "FORWARD", "-i", ifName, "-j", "ACCEPT").Run()
 	exec.Command("iptables", "-D", "FORWARD", "-o", ifName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT").Run()
 }
