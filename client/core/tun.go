@@ -193,6 +193,12 @@ func (c *Client) handleTunSetup(msg Message) {
 	if len(setup.Routes) > 0 {
 		enableIPForwarding()
 		enableNAT(dev.ifName)
+		c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("IP forwarding + NAT enabled on %s for routes: %v", dev.ifName, setup.Routes)})
+
+		// Verify forwarding status
+		if out := checkForwardingStatus(); out != "" {
+			c.emit(EventLog, LogEvent{Level: "info", Message: "Forwarding status: " + out})
+		}
 	}
 
 	peerName := shortID(msg.From)

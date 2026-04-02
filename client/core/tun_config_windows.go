@@ -5,6 +5,7 @@ package core
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -88,6 +89,17 @@ func runSilentErr(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd.Run()
+}
+
+func checkForwardingStatus() string {
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; `+
+			`$fwd = Get-NetIPInterface | Where-Object { $_.Forwarding -eq 'Enabled' } | Select-Object -ExpandProperty InterfaceAlias; `+
+			`$nat = Get-NetNat -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name; `+
+			`"Forwarding on: $($fwd -join ', '); NAT: $($nat -join ', ')"`)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, _ := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out))
 }
 
 func enableIPForwarding() {

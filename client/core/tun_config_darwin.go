@@ -5,6 +5,7 @@ package core
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"golang.zx2c4.com/wireguard/tun"
 )
@@ -102,4 +103,9 @@ func enableNAT(ifName string) {
 
 func disableNAT(ifName string) {
 	exec.Command("pfctl", "-d").Run()
+}
+
+func checkForwardingStatus() string {
+	out, _ := exec.Command("sysctl", "net.inet.ip.forwarding").CombinedOutput()
+	return strings.TrimSpace(string(out))
 }

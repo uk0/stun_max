@@ -5,6 +5,7 @@ package core
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"golang.zx2c4.com/wireguard/tun"
 )
@@ -98,4 +99,9 @@ func disableNAT(ifName string) {
 	exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "!", "-o", ifName, "-j", "MASQUERADE").Run()
 	exec.Command("iptables", "-D", "FORWARD", "-i", ifName, "-j", "ACCEPT").Run()
 	exec.Command("iptables", "-D", "FORWARD", "-o", ifName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT").Run()
+}
+
+func checkForwardingStatus() string {
+	out, _ := exec.Command("sysctl", "net.ipv4.ip_forward").CombinedOutput()
+	return strings.TrimSpace(string(out))
 }
