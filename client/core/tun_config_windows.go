@@ -92,27 +92,37 @@ func runSilentErr(name string, args ...string) error {
 }
 
 func checkForwardingStatus() string {
+	// Check actual forwarding state + NAT state + firewall state
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; `+
-			`$fwd = Get-NetIPInterface | Where-Object { $_.Forwarding -eq 'Enabled' } | Select-Object -ExpandProperty InterfaceAlias; `+
+			`$fwd = Get-NetIPInterface | Where-Object { $_.Forwarding -eq 'Enabled' } | Select-Object -ExpandProperty InterfaceAlias -ErrorAction SilentlyContinue; `+
 			`$nat = Get-NetNat -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name; `+
-			`"Forwarding on: $($fwd -join ', '); NAT: $($nat -join ', ')"`)
+			`$fw = (Get-NetFirewallProfile | Where-Object {$_.Enabled -eq 'True'} | Measure-Object).Count; `+
+			`$reg = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name IPEnableRouter -ErrorAction SilentlyContinue).IPEnableRouter; `+
+			`"Fwd interfaces: [$($fwd -join ', ')]; NAT: [$($nat -join ', ')]; FW profiles active: $fw; Registry IPEnableRouter: $reg"`)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, _ := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out))
 }
 
 func enableIPForwarding() {
-	// Method 1: Set-NetIPInterface (immediate, per-interface)
+	// Method 1: Per-interface forwarding (immediate)
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`Get-NetAdapter | ForEach-Object { Set-NetIPInterface -InterfaceIndex $_.ifIndex -Forwarding Enabled -ErrorAction SilentlyContinue }`)
-	// Method 2: Registry (persistent, needs reboot for first time)
+	// Method 2: Registry (persistent)
 	runSilent("reg", "add", `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters`,
 		"/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "1", "/f")
-	// Method 3: Enable RRAS service (Routing and Remote Access)
+	// Method 3: RRAS service
 	runSilent("sc", "config", "RemoteAccess", "start=", "auto")
 	runSilent("net", "start", "RemoteAccess")
-	// Method 4: Disable firewall on TUN interface to allow forwarding
+	// Method 4: Allow forwarding through Windows Firewall
+	runSilent("netsh", "advfirewall", "firewall", "add", "rule",
+		"name=StunMax-Forward", "dir=in", "action=allow", "enable=yes",
+		"profile=any", "protocol=any")
+	runSilent("netsh", "advfirewall", "firewall", "add", "rule",
+		"name=StunMax-Forward-Out", "dir=out", "action=allow", "enable=yes",
+		"profile=any", "protocol=any")
+	// Disable firewall on TUN profile to allow forwarded packets
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`Set-NetFirewallProfile -All -Enabled False -ErrorAction SilentlyContinue`)
 }
