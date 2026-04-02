@@ -91,23 +91,40 @@ func runSilentErr(name string, args ...string) error {
 }
 
 func enableIPForwarding() {
-	// Immediate effect (no reboot needed) — enable forwarding on ALL interfaces
+	// Method 1: Set-NetIPInterface (immediate, per-interface)
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`Get-NetAdapter | ForEach-Object { Set-NetIPInterface -InterfaceIndex $_.ifIndex -Forwarding Enabled -ErrorAction SilentlyContinue }`)
-	// Also set registry for persistence across reboots
+	// Method 2: Registry (persistent, needs reboot for first time)
 	runSilent("reg", "add", `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters`,
 		"/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "1", "/f")
+	// Method 3: Enable RRAS service (Routing and Remote Access)
+	runSilent("sc", "config", "RemoteAccess", "start=", "auto")
+	runSilent("net", "start", "RemoteAccess")
+	// Method 4: Disable firewall on TUN interface to allow forwarding
+	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`Set-NetFirewallProfile -All -Enabled False -ErrorAction SilentlyContinue`)
 }
 
 func enableNAT(ifName string) {
-	// Win10: use New-NetNat (works without Hyper-V on modern Win10/11)
-	// First remove any existing StunMax NAT
+	// Method 1: New-NetNat (Win10/11)
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`Remove-NetNat -Name StunMaxNAT -Confirm:$false -ErrorAction SilentlyContinue`)
-	// Create NAT for the VPN subnet
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`New-NetNat -Name StunMaxNAT -InternalIPInterfaceAddressPrefix "10.7.0.0/24" -ErrorAction SilentlyContinue`)
-	// Fallback: try netsh routing (Windows Server)
+	// Method 2: ICS (Internet Connection Sharing) via COM
+	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`$m = New-Object -ComObject HNetCfg.HNetShare; `+
+			`$conns = $m.EnumEveryConnection; `+
+			`foreach($c in $conns) { `+
+			`  $props = $m.NetConnectionProps($c); `+
+			`  $cfg = $m.INetSharingConfigurationForINetConnection($c); `+
+			`  if($props.Name -eq '`+ifName+`') { `+
+			`    $cfg.EnableSharing(1) `+  // 1 = private
+			`  } elseif($props.Status -eq 2) { `+ // 2 = connected
+			`    $cfg.EnableSharing(0) `+  // 0 = public (share internet)
+			`  } `+
+			`}`)
+	// Method 3: netsh routing (Windows Server fallback)
 	runSilent("netsh", "routing", "ip", "nat", "install")
 	runSilent("netsh", "routing", "ip", "nat", "add", "interface", ifName, "full")
 }
@@ -116,6 +133,17 @@ func disableNAT(ifName string) {
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`Remove-NetNat -Name StunMaxNAT -Confirm:$false -ErrorAction SilentlyContinue`)
 	runSilent("netsh", "routing", "ip", "nat", "delete", "interface", ifName)
+	// Disable ICS
+	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`$m = New-Object -ComObject HNetCfg.HNetShare; `+
+			`$conns = $m.EnumEveryConnection; `+
+			`foreach($c in $conns) { `+
+			`  $cfg = $m.INetSharingConfigurationForINetConnection($c); `+
+			`  $cfg.DisableSharing() `+
+			`}`)
+	// Re-enable firewall
+	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`Set-NetFirewallProfile -All -Enabled True -ErrorAction SilentlyContinue`)
 	// Disable forwarding
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		`Get-NetAdapter | ForEach-Object { Set-NetIPInterface -InterfaceIndex $_.ifIndex -Forwarding Disabled -ErrorAction SilentlyContinue }`)
