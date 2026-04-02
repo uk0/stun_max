@@ -3,57 +3,16 @@
 package core
 
 import (
-	"encoding/binary"
 	"os/exec"
 
 	"github.com/songgao/water"
 )
 
-// waterIface wraps water.Interface for macOS utun.
-// macOS utun requires a 4-byte AF header before each IP packet.
+// waterIface wraps water.Interface for macOS.
+// water library already handles the 4-byte AF header internally
+// (tunReadCloser strips on read, adds on write), so we just pass through.
 type waterIface struct {
-	dev *water.Interface
-}
-
-func (w *waterIface) Read(b []byte) (int, error) {
-	// Read with 4-byte AF header, strip it
-	buf := make([]byte, len(b)+4)
-	n, err := w.dev.Read(buf)
-	if err != nil {
-		return 0, err
-	}
-	if n <= 4 {
-		return 0, nil
-	}
-	copy(b, buf[4:n])
-	return n - 4, nil
-}
-
-func (w *waterIface) Write(b []byte) (int, error) {
-	// Prepend 4-byte AF header (AF_INET = 2 for IPv4)
-	buf := make([]byte, 4+len(b))
-	if len(b) > 0 && (b[0]>>4) == 6 {
-		binary.BigEndian.PutUint32(buf[:4], 30) // AF_INET6
-	} else {
-		binary.BigEndian.PutUint32(buf[:4], 2) // AF_INET
-	}
-	copy(buf[4:], b)
-	n, err := w.dev.Write(buf)
-	if err != nil {
-		return 0, err
-	}
-	if n <= 4 {
-		return 0, nil
-	}
-	return n - 4, nil
-}
-
-func (w *waterIface) Close() error {
-	return w.dev.Close()
-}
-
-func (w *waterIface) Name() string {
-	return w.dev.Name()
+	*water.Interface
 }
 
 func createPlatformTun() (tunIface, error) {
@@ -61,7 +20,7 @@ func createPlatformTun() (tunIface, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &waterIface{dev: iface}, nil
+	return &waterIface{iface}, nil
 }
 
 func configureTunInterface(ifName, localIP, peerIP string) error {
