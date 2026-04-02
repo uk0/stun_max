@@ -30,7 +30,24 @@ type ForwardsPanel struct {
 	ModeBtns    map[int]*widget.Clickable
 	List        widget.List
 	Error       string
-	inited      bool
+
+	// Expose (reverse forward) form
+	ExposeHostEditor   widget.Editor   // source host (your service)
+	ExposePortEditor   widget.Editor   // source port (your service)
+	ExposePeerEditor   widget.Editor   // target peer
+	ExposeRemoteEditor widget.Editor   // remote port on peer
+	ExposeBtn          widget.Clickable
+	ExposeError        string
+
+	// Hop forward form
+	HopViaEditor    widget.Editor // via (intermediate) peer
+	HopTargetEditor widget.Editor // target peer
+	HopHostEditor   widget.Editor // target host:port
+	HopLocalEditor  widget.Editor // local port
+	HopBtn          widget.Clickable
+	HopError        string
+
+	inited bool
 }
 
 func (f *ForwardsPanel) init() {
@@ -46,6 +63,14 @@ func (f *ForwardsPanel) init() {
 	f.StartFwdBtns = make(map[int]*widget.Clickable)
 	f.ModeBtns = make(map[int]*widget.Clickable)
 	f.List.Axis = layout.Vertical
+	f.ExposeHostEditor.SingleLine = true
+	f.ExposePortEditor.SingleLine = true
+	f.ExposePeerEditor.SingleLine = true
+	f.ExposeRemoteEditor.SingleLine = true
+	f.HopViaEditor.SingleLine = true
+	f.HopTargetEditor.SingleLine = true
+	f.HopHostEditor.SingleLine = true
+	f.HopLocalEditor.SingleLine = true
 }
 
 // Layout renders the forwards panel.
@@ -92,6 +117,91 @@ func (f *ForwardsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 							f.PeerEditor.SetText("")
 							f.HostEditor.SetText("")
 							f.LocalEditor.SetText("")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Handle expose (reverse forward)
+	if f.ExposeBtn.Clicked(gtx) && a.Client != nil {
+		f.ExposeError = ""
+		peer := strings.TrimSpace(f.ExposePeerEditor.Text())
+		hostStr := strings.TrimSpace(f.ExposeHostEditor.Text())
+		portStr := strings.TrimSpace(f.ExposePortEditor.Text())
+		remoteStr := strings.TrimSpace(f.ExposeRemoteEditor.Text())
+
+		if peer == "" || portStr == "" {
+			f.ExposeError = "Peer and source port are required"
+		} else {
+			srcPort, err := strconv.Atoi(portStr)
+			if err != nil || srcPort <= 0 || srcPort > 65535 {
+				f.ExposeError = "Invalid source port"
+			} else {
+				remotePort := srcPort
+				if remoteStr != "" {
+					rp, err := strconv.Atoi(remoteStr)
+					if err != nil || rp <= 0 || rp > 65535 {
+						f.ExposeError = "Invalid remote port"
+					} else {
+						remotePort = rp
+					}
+				}
+				if f.ExposeError == "" {
+					host := hostStr
+					if host == "" {
+						host = "127.0.0.1"
+					}
+					if err := a.Client.ExposePort(peer, host, srcPort, remotePort); err != nil {
+						f.ExposeError = err.Error()
+					} else {
+						f.ExposePeerEditor.SetText("")
+						f.ExposeHostEditor.SetText("")
+						f.ExposePortEditor.SetText("")
+						f.ExposeRemoteEditor.SetText("")
+					}
+				}
+			}
+		}
+	}
+
+	// Handle hop forward
+	if f.HopBtn.Clicked(gtx) && a.Client != nil {
+		f.HopError = ""
+		via := strings.TrimSpace(f.HopViaEditor.Text())
+		target := strings.TrimSpace(f.HopTargetEditor.Text())
+		hostPort := strings.TrimSpace(f.HopHostEditor.Text())
+		localStr := strings.TrimSpace(f.HopLocalEditor.Text())
+
+		if via == "" || target == "" || hostPort == "" {
+			f.HopError = "Via peer, target peer, and host:port are required"
+		} else {
+			host, portStr, ok := splitHostPort(hostPort)
+			if !ok {
+				f.HopError = "Invalid host:port format"
+			} else {
+				remotePort, err := strconv.Atoi(portStr)
+				if err != nil || remotePort <= 0 || remotePort > 65535 {
+					f.HopError = "Invalid remote port"
+				} else {
+					localPort := remotePort
+					if localStr != "" {
+						lp, err := strconv.Atoi(localStr)
+						if err != nil || lp <= 0 || lp > 65535 {
+							f.HopError = "Invalid local port"
+						} else {
+							localPort = lp
+						}
+					}
+					if f.HopError == "" {
+						if err := a.Client.StartHopForward(via, target, host, remotePort, localPort); err != nil {
+							f.HopError = err.Error()
+						} else {
+							f.HopViaEditor.SetText("")
+							f.HopTargetEditor.SetText("")
+							f.HopHostEditor.SetText("")
+							f.HopLocalEditor.SetText("")
 						}
 					}
 				}
@@ -173,6 +283,16 @@ func (f *ForwardsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return f.layoutForm(gtx, th)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return f.layoutExposeForm(gtx, th)
+			})
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return f.layoutHopForm(gtx, th)
+			})
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{Top: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -443,6 +563,145 @@ func (f *ForwardsPanel) layoutStoppedCard(gtx layout.Context, th *material.Theme
 							btn.TextSize = unit.Sp(11)
 							btn.Inset = layout.Inset{Top: unit.Dp(3), Bottom: unit.Dp(3), Left: unit.Dp(8), Right: unit.Dp(8)}
 							return btn.Layout(gtx)
+						})
+					}),
+				)
+			})
+		}),
+	)
+}
+
+func (f *ForwardsPanel) layoutExposeForm(gtx layout.Context, th *material.Theme) layout.Dimensions {
+	return layout.Stack{}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
+			paint.FillShape(gtx.Ops, CardColor, rr.Op(gtx.Ops))
+			return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Min.Y)}
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			return layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Body1(th, "Expose Port (Reverse Forward)")
+						lbl.Color = TextColor
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Caption(th, "Make your local port accessible to a peer")
+							lbl.Color = DimColor
+							return lbl.Layout(gtx)
+						})
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceEvenly}.Layout(gtx,
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									return layoutInputField(gtx, th, &f.ExposeHostEditor, "Host (default 127.0.0.1)")
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									gtx.Constraints.Max.X = gtx.Dp(unit.Dp(90))
+									return layoutInputField(gtx, th, &f.ExposePortEditor, "Your port")
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									return layoutInputField(gtx, th, &f.ExposePeerEditor, "Peer ID or name")
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									gtx.Constraints.Max.X = gtx.Dp(unit.Dp(90))
+									return layoutInputField(gtx, th, &f.ExposeRemoteEditor, "Remote port")
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									btn := material.Button(th, &f.ExposeBtn, "Expose")
+									btn.Background = AccentColor
+									btn.Color = color.NRGBA{A: 255}
+									btn.CornerRadius = unit.Dp(4)
+									btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
+									return btn.Layout(gtx)
+								}),
+							)
+						})
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if f.ExposeError == "" {
+							return layout.Dimensions{}
+						}
+						return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Caption(th, f.ExposeError)
+							lbl.Color = ErrorColor
+							return lbl.Layout(gtx)
+						})
+					}),
+				)
+			})
+		}),
+	)
+}
+
+func (f *ForwardsPanel) layoutHopForm(gtx layout.Context, th *material.Theme) layout.Dimensions {
+	return layout.Stack{}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
+			paint.FillShape(gtx.Ops, CardColor, rr.Op(gtx.Ops))
+			return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Min.Y)}
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			return layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Body1(th, "Multi-Hop Forward")
+						lbl.Color = TextColor
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Caption(th, "Route traffic: local → via peer → target peer:host:port")
+							lbl.Color = DimColor
+							return lbl.Layout(gtx)
+						})
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceEvenly}.Layout(gtx,
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									return layoutInputField(gtx, th, &f.HopViaEditor, "Via peer")
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									return layoutInputField(gtx, th, &f.HopTargetEditor, "Target peer")
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									return layoutInputField(gtx, th, &f.HopHostEditor, "host:port")
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									gtx.Constraints.Max.X = gtx.Dp(unit.Dp(80))
+									return layoutInputField(gtx, th, &f.HopLocalEditor, "Local port")
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									btn := material.Button(th, &f.HopBtn, "Hop")
+									btn.Background = AccentColor
+									btn.Color = color.NRGBA{A: 255}
+									btn.CornerRadius = unit.Dp(4)
+									btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
+									return btn.Layout(gtx)
+								}),
+							)
+						})
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if f.HopError == "" {
+							return layout.Dimensions{}
+						}
+						return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Caption(th, f.HopError)
+							lbl.Color = ErrorColor
+							return lbl.Layout(gtx)
 						})
 					}),
 				)

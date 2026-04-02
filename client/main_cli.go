@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -146,6 +147,55 @@ func consumeEvents() {
 			if le, ok := evt.Data.(core.LogEvent); ok {
 				notify(cRed, "%s", le.Message)
 			}
+		case core.EventReverseForwardStarted:
+			if fe, ok := evt.Data.(core.ForwardEvent); ok {
+				notify(cGreen, "Reverse forward active: peer exposed :%d -> %s:%d via %s", fe.LocalPort, fe.RemoteHost, fe.RemotePort, fe.PeerName)
+			}
+		case core.EventReverseForwardStopped:
+			if fe, ok := evt.Data.(core.ForwardEvent); ok {
+				notify(cYellow, "Reverse forward stopped: :%d", fe.LocalPort)
+			}
+		case core.EventFileOffer:
+			if fo, ok := evt.Data.(core.FileOfferEvent); ok {
+				notify(cCyan, "Incoming file from %s: %s (%s)", fo.PeerName, fo.FileName, fmtFileBytes(fo.FileSize))
+				// Auto-accept in CLI mode
+				home, _ := os.UserHomeDir()
+				saveDir := filepath.Join(home, "Downloads", "StunMax")
+				savePath := filepath.Join(saveDir, fo.FileName)
+				if err := client.AcceptFile(fo.TransferID, savePath); err != nil {
+					notify(cRed, "Auto-accept failed: %v", err)
+				} else {
+					notify(cGreen, "Auto-accepted, saving to %s", savePath)
+				}
+			}
+		case core.EventFileProgress:
+			if fp, ok := evt.Data.(core.FileProgressEvent); ok {
+				notify(cCyan, "Transfer %s: %.0f%% (%s/s)", fp.TransferID[:8], fp.Progress*100, fmtFileBytes(int64(fp.Speed)))
+			}
+		case core.EventFileComplete:
+			if fc, ok := evt.Data.(core.FileCompleteEvent); ok {
+				if fc.Direction == "send" {
+					notify(cGreen, "File sent: %s", fc.FileName)
+				} else {
+					notify(cGreen, "File received: %s", fc.FileName)
+				}
+			}
+		case core.EventFileError:
+			if fe, ok := evt.Data.(core.FileErrorEvent); ok {
+				notify(cRed, "File transfer error [%s]: %s", fe.TransferID[:8], fe.Error)
+			}
+		case core.EventTunStarted:
+			if le, ok := evt.Data.(core.LogEvent); ok {
+				notify(cGreen, "%s", le.Message)
+			}
+		case core.EventTunStopped:
+			if le, ok := evt.Data.(core.LogEvent); ok {
+				notify(cYellow, "%s", le.Message)
+			}
+		case core.EventTunError:
+			if le, ok := evt.Data.(core.LogEvent); ok {
+				notify(cRed, "VPN error: %s", le.Message)
+			}
 		case core.EventLog:
 			if le, ok := evt.Data.(core.LogEvent); ok {
 				switch le.Level {
@@ -214,6 +264,25 @@ func runCLI() {
 				return names
 			}),
 		),
+		readline.PcItem("expose",
+			readline.PcItemDynamic(func(line string) []string {
+				if client == nil {
+					return nil
+				}
+				peers := client.Peers()
+				var names []string
+				for _, p := range peers {
+					if p.ID == client.MyID {
+						continue
+					}
+					if p.Name != "" {
+						names = append(names, p.Name)
+					}
+					names = append(names, p.ID)
+				}
+				return names
+			}),
+		),
 		readline.PcItem("unforward",
 			readline.PcItemDynamic(func(line string) []string {
 				if client == nil {
@@ -244,6 +313,66 @@ func runCLI() {
 					} else {
 						names = append(names, p.ID)
 					}
+				}
+				return names
+			}),
+		),
+		readline.PcItem("send",
+			readline.PcItemDynamic(func(line string) []string {
+				if client == nil {
+					return nil
+				}
+				peers := client.Peers()
+				var names []string
+				for _, p := range peers {
+					if p.ID == client.MyID {
+						continue
+					}
+					if p.Name != "" {
+						names = append(names, p.Name)
+					}
+					names = append(names, p.ID)
+				}
+				return names
+			}),
+		),
+		readline.PcItem("transfers"),
+		readline.PcItem("hop",
+			readline.PcItemDynamic(func(line string) []string {
+				if client == nil {
+					return nil
+				}
+				peers := client.Peers()
+				var names []string
+				for _, p := range peers {
+					if p.ID == client.MyID {
+						continue
+					}
+					if p.Name != "" {
+						names = append(names, p.Name)
+					}
+					names = append(names, p.ID)
+				}
+				return names
+			}),
+		),
+		readline.PcItem("vpn",
+			readline.PcItem("stop"),
+			readline.PcItem("status"),
+			readline.PcItemDynamic(func(line string) []string {
+				if client == nil {
+					return nil
+				}
+				peers := client.Peers()
+				var names []string
+				for _, p := range peers {
+					if p.ID == client.MyID {
+						continue
+					}
+					if p.Name != "" {
+						names = append(names, p.Name)
+					}
+					names = append(names, p.ID)
 				}
 				return names
 			}),
@@ -293,12 +422,22 @@ func runCLI() {
 			printForwards()
 		case "forward":
 			cmdForward(parts[1:])
+		case "expose":
+			cmdExpose(parts[1:])
 		case "unforward":
 			cmdUnforward(parts[1:])
 		case "stun":
 			cmdStun()
 		case "speedtest":
 			cmdSpeedTest(parts[1:])
+		case "send":
+			cmdSendFile(parts[1:])
+		case "transfers":
+			cmdTransfers()
+		case "hop":
+			cmdHop(parts[1:])
+		case "vpn":
+			cmdVPN(parts[1:])
 		case "help":
 			printHelp()
 		case "quit", "exit":
@@ -411,6 +550,39 @@ func cmdForward(args []string) {
 	}
 }
 
+func cmdExpose(args []string) {
+	if len(args) < 2 {
+		fmt.Printf("%sUsage: expose <peer> <host:port> [remote_port]%s\n", cRed, cReset)
+		return
+	}
+
+	hostPort := args[1]
+	host, portStr, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		fmt.Printf("%sInvalid host:port: %s%s\n", cRed, hostPort, cReset)
+		return
+	}
+	srcPort, err := strconv.Atoi(portStr)
+	if err != nil || srcPort <= 0 || srcPort > 65535 {
+		fmt.Printf("%sInvalid port: %s%s\n", cRed, portStr, cReset)
+		return
+	}
+
+	remotePort := srcPort
+	if len(args) >= 3 {
+		rp, err := strconv.Atoi(args[2])
+		if err != nil || rp <= 0 || rp > 65535 {
+			fmt.Printf("%sInvalid remote port: %s%s\n", cRed, args[2], cReset)
+			return
+		}
+		remotePort = rp
+	}
+
+	if err := client.ExposePort(args[0], host, srcPort, remotePort); err != nil {
+		fmt.Printf("%s%v%s\n", cRed, err, cReset)
+	}
+}
+
 func cmdUnforward(args []string) {
 	if len(args) < 1 {
 		fmt.Printf("%sUsage: unforward <local_port>%s\n", cRed, cReset)
@@ -457,17 +629,97 @@ func cmdSpeedTest(args []string) {
 	fmt.Printf("%sSpeed test started: %s%s\n", cCyan, testID[:8], cReset)
 }
 
+func cmdHop(args []string) {
+	// Usage: hop <via_peer> <target_peer> <host:port> [local_port]
+	if len(args) < 3 {
+		fmt.Printf("%sUsage: hop <via_peer> <target_peer> <host:port> [local_port]%s\n", cRed, cReset)
+		return
+	}
+
+	viaPeer := args[0]
+	targetPeer := args[1]
+	hostPort := args[2]
+
+	host, portStr, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		fmt.Printf("%sInvalid host:port: %s%s\n", cRed, hostPort, cReset)
+		return
+	}
+	remotePort, err := strconv.Atoi(portStr)
+	if err != nil || remotePort <= 0 || remotePort > 65535 {
+		fmt.Printf("%sInvalid port: %s%s\n", cRed, portStr, cReset)
+		return
+	}
+
+	localPort := remotePort
+	if len(args) >= 4 {
+		lp, err := strconv.Atoi(args[3])
+		if err != nil || lp <= 0 || lp > 65535 {
+			fmt.Printf("%sInvalid local port: %s%s\n", cRed, args[3], cReset)
+			return
+		}
+		localPort = lp
+	}
+
+	if err := client.StartHopForward(viaPeer, targetPeer, host, remotePort, localPort); err != nil {
+		fmt.Printf("%s%v%s\n", cRed, err, cReset)
+	}
+}
+
+func cmdVPN(args []string) {
+	if len(args) == 0 {
+		fmt.Printf("%sUsage: vpn <peer> | vpn stop | vpn status%s\n", cRed, cReset)
+		return
+	}
+
+	subcmd := strings.ToLower(args[0])
+	switch subcmd {
+	case "stop":
+		if err := client.StopTun(); err != nil {
+			fmt.Printf("%s%v%s\n", cRed, err, cReset)
+		}
+	case "status":
+		info := client.TunStatus()
+		if !info.Enabled {
+			fmt.Printf("%sNo active VPN.%s\n", cGray, cReset)
+			return
+		}
+		fmt.Printf("\n%sVPN Status:%s\n", cBold, cReset)
+		fmt.Printf("  Local IP:  %s%s%s\n", cGreen, info.VirtualIP, cReset)
+		fmt.Printf("  Peer IP:   %s%s%s\n", cGreen, info.PeerIP, cReset)
+		fmt.Printf("  Subnet:    %s\n", info.Subnet)
+		fmt.Printf("  Peer:      %s (%s)\n", info.PeerName, shortID(info.PeerID))
+		fmt.Printf("  Traffic:   ↑%s ↓%s\n", fmtBytes(info.BytesUp), fmtBytes(info.BytesDown))
+		if info.RateUp > 0 || info.RateDown > 0 {
+			fmt.Printf("  Rate:      ↑%s/s ↓%s/s\n", fmtBytes(int64(info.RateUp)), fmtBytes(int64(info.RateDown)))
+		}
+		fmt.Println()
+	default:
+		// Treat as peer ID
+		if err := client.StartTun(subcmd); err != nil {
+			fmt.Printf("%s%v%s\n", cRed, err, cReset)
+		}
+	}
+}
+
 func printHelp() {
 	fmt.Println()
 	fmt.Printf("%sCommands:%s\n", cBold, cReset)
-	fmt.Println("  peers                                List peers in room")
-	fmt.Println("  forward <peer> <host:port> [local]   Forward remote port to local")
-	fmt.Println("  unforward <local_port>               Stop a forward")
-	fmt.Println("  forwards                             List active forwards")
-	fmt.Println("  stun                                 Show STUN/P2P status")
-	fmt.Println("  speedtest <peer>                     Run speed test")
-	fmt.Println("  help                                 Show this help")
-	fmt.Println("  quit                                 Disconnect")
+	fmt.Println("  peers                                      List peers in room")
+	fmt.Println("  forward <peer> <host:port> [local]         Forward remote port to local")
+	fmt.Println("  hop <via> <target> <host:port> [local]     Multi-hop: local → via → target:host:port")
+	fmt.Println("  expose <peer> <host:port> [remote]         Expose your local port to peer (reverse forward)")
+	fmt.Println("  unforward <local_port>                     Stop a forward")
+	fmt.Println("  forwards                                   List active forwards")
+	fmt.Println("  stun                                       Show STUN/P2P status")
+	fmt.Println("  speedtest <peer>                           Run speed test")
+	fmt.Println("  send <peer> <filepath>                     Send file to peer")
+	fmt.Println("  transfers                                  List active file transfers")
+	fmt.Println("  vpn <peer>                                 Start TUN VPN to peer (needs root)")
+	fmt.Println("  vpn stop                                   Stop active VPN")
+	fmt.Println("  vpn status                                 Show VPN status")
+	fmt.Println("  help                                       Show this help")
+	fmt.Println("  quit                                       Disconnect")
 	fmt.Println()
 }
 
@@ -482,4 +734,75 @@ func fmtBytes(b int64) string {
 		return fmt.Sprintf("%.1fM", float64(b)/(1024*1024))
 	}
 	return fmt.Sprintf("%.2fG", float64(b)/(1024*1024*1024))
+}
+
+func cmdSendFile(args []string) {
+	if len(args) < 2 {
+		fmt.Printf("%sUsage: send <peer> <filepath>%s\n", cRed, cReset)
+		return
+	}
+	peer := args[0]
+	filePath := strings.Join(args[1:], " ") // support paths with spaces
+	tid, err := client.SendFile(peer, filePath)
+	if err != nil {
+		fmt.Printf("%s%v%s\n", cRed, err, cReset)
+		return
+	}
+	fmt.Printf("%sFile offer sent (transfer %s)%s\n", cCyan, tid[:8], cReset)
+}
+
+func cmdTransfers() {
+	transfers := client.FileTransfers()
+	if len(transfers) == 0 {
+		fmt.Printf("%sNo active file transfers.%s\n", cGray, cReset)
+		return
+	}
+	fmt.Printf("\n%sFile transfers:%s\n", cBold, cReset)
+	fmt.Printf("  %-10s %-8s %-20s %-14s %-10s %-10s %-12s\n", "ID", "DIR", "FILE", "PEER", "PROGRESS", "SPEED", "STATUS")
+	for _, t := range transfers {
+		tid := t.TransferID
+		if len(tid) > 8 {
+			tid = tid[:8]
+		}
+		fileName := t.FileName
+		if len(fileName) > 18 {
+			fileName = fileName[:18] + ".."
+		}
+		peerName := t.PeerName
+		if len(peerName) > 12 {
+			peerName = peerName[:12]
+		}
+		progress := fmt.Sprintf("%.0f%%", t.Progress*100)
+		speed := ""
+		if t.Speed > 0 {
+			speed = fmtFileBytes(int64(t.Speed)) + "/s"
+		}
+		statusColor := cGray
+		switch t.Status {
+		case "active":
+			statusColor = cCyan
+		case "complete":
+			statusColor = cGreen
+		case "error":
+			statusColor = cRed
+		case "pending":
+			statusColor = cYellow
+		}
+		fmt.Printf("  %-10s %-8s %-20s %-14s %-10s %-10s %s%-12s%s\n",
+			tid, t.Direction, fileName, peerName, progress, speed, statusColor, t.Status, cReset)
+	}
+	fmt.Println()
+}
+
+func fmtFileBytes(b int64) string {
+	if b < 1024 {
+		return fmt.Sprintf("%dB", b)
+	}
+	if b < 1024*1024 {
+		return fmt.Sprintf("%.1fKB", float64(b)/1024)
+	}
+	if b < 1024*1024*1024 {
+		return fmt.Sprintf("%.1fMB", float64(b)/(1024*1024))
+	}
+	return fmt.Sprintf("%.2fGB", float64(b)/(1024*1024*1024))
 }

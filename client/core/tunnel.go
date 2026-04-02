@@ -353,6 +353,32 @@ func (c *Client) handleTunnelData(msg Message) {
 	if err := json.Unmarshal(msg.Payload, &td); err != nil {
 		return
 	}
+
+	// Check if this tunnel is part of a hop bridge (B's relay role).
+	// If so, re-relay the data to the other side without decompress/recompress.
+	c.hopsMu.RLock()
+	bridge, isHop := c.hopBridgeByTunnel[td.TunnelID]
+	c.hopsMu.RUnlock()
+
+	if isHop {
+		var targetPeer, targetTunnel string
+		if td.TunnelID == bridge.InboundTunnelID {
+			// Data from A → forward to C
+			targetPeer = bridge.TargetPeerID
+			targetTunnel = bridge.OutboundTunnelID
+		} else {
+			// Data from C → forward to A
+			targetPeer = bridge.OriginPeerID
+			targetTunnel = bridge.InboundTunnelID
+		}
+		// Re-relay as-is (data is already base64-encoded compressed payload)
+		c.sendRelay(targetPeer, "tunnel_data", TunnelData{
+			TunnelID: targetTunnel,
+			Data:     td.Data,
+		})
+		return
+	}
+
 	c.tunnelsMu.RLock()
 	tc, ok := c.tunnels[td.TunnelID]
 	c.tunnelsMu.RUnlock()
@@ -380,12 +406,67 @@ func (c *Client) handleTunnelData(msg Message) {
 func (c *Client) handleCloseTunnel(msg Message) {
 	var info TunnelClose
 	json.Unmarshal(msg.Payload, &info)
+
+	// If this tunnel is part of a hop bridge, close the other side too.
+	c.hopsMu.Lock()
+	bridge, isHop := c.hopBridgeByTunnel[info.TunnelID]
+	if isHop {
+		delete(c.hopBridgeByTunnel, bridge.InboundTunnelID)
+		delete(c.hopBridgeByTunnel, bridge.OutboundTunnelID)
+		delete(c.hops, bridge.HopID)
+		select {
+		case <-bridge.Done:
+		default:
+			close(bridge.Done)
+		}
+	}
+	c.hopsMu.Unlock()
+
+	if isHop {
+		// Propagate close to the other side of the bridge
+		var targetPeer, targetTunnel string
+		if info.TunnelID == bridge.InboundTunnelID {
+			targetPeer = bridge.TargetPeerID
+			targetTunnel = bridge.OutboundTunnelID
+		} else {
+			targetPeer = bridge.OriginPeerID
+			targetTunnel = bridge.InboundTunnelID
+		}
+		c.sendTunnelClose(targetPeer, targetTunnel)
+		return
+	}
+
 	c.closeTunnel(info.TunnelID)
 }
 
 func (c *Client) handleTunnelRejected(msg Message) {
 	var info TunnelRejected
 	json.Unmarshal(msg.Payload, &info)
+
+	// If this is a hop bridge outbound tunnel being rejected by C, clean up the bridge
+	// and notify A via hop_forward_reject.
+	c.hopsMu.Lock()
+	bridge, isHop := c.hopBridgeByTunnel[info.TunnelID]
+	if isHop {
+		delete(c.hopBridgeByTunnel, bridge.InboundTunnelID)
+		delete(c.hopBridgeByTunnel, bridge.OutboundTunnelID)
+		delete(c.hops, bridge.HopID)
+		select {
+		case <-bridge.Done:
+		default:
+			close(bridge.Done)
+		}
+	}
+	c.hopsMu.Unlock()
+
+	if isHop {
+		c.sendRelay(bridge.OriginPeerID, "hop_forward_reject", HopForwardReject{
+			HopID:  bridge.HopID,
+			Reason: "target rejected: " + info.Reason,
+		})
+		return
+	}
+
 	c.closeTunnel(info.TunnelID)
 	c.emit(EventTunnelRejected, LogEvent{Level: "error", Message: "Tunnel rejected: " + info.Reason})
 }
@@ -415,4 +496,75 @@ func (c *Client) closeTunnel(tunnelID string) {
 
 func (c *Client) sendTunnelClose(peerID, tunnelID string) {
 	c.sendRelay(peerID, "close_tunnel", TunnelClose{TunnelID: tunnelID})
+}
+
+// ExposePort sends a reverse forward offer to a peer.
+// The caller (B) asks the peer (A) to open a local listener on targetPort
+// that tunnels back to B's sourceHost:sourcePort.
+func (c *Client) ExposePort(peerID string, sourceHost string, sourcePort, targetPort int) error {
+	fullID, err := c.resolvePeerID(peerID)
+	if err != nil {
+		return err
+	}
+	offerID := generateTunnelID()
+	return c.sendRelay(fullID, "reverse_forward_offer", ReverseForwardOffer{
+		OfferID:    offerID,
+		SourceHost: sourceHost,
+		SourcePort: sourcePort,
+		TargetPort: targetPort,
+	})
+}
+
+// handleReverseForwardOffer: A receives B's request to expose a port.
+// A opens a local listener and creates a Forward that tunnels back to B.
+func (c *Client) handleReverseForwardOffer(msg Message) {
+	var offer ReverseForwardOffer
+	if err := json.Unmarshal(msg.Payload, &offer); err != nil {
+		return
+	}
+
+	c.acMu.RLock()
+	allowed := c.allowForward
+	c.acMu.RUnlock()
+	if !allowed {
+		c.sendRelay(msg.From, "reverse_forward_reject", ReverseForwardReject{
+			OfferID: offer.OfferID, Reason: "forwarding disabled",
+		})
+		return
+	}
+
+	// Reuse StartForward: open local listener on targetPort, tunnel to B's sourceHost:sourcePort.
+	if err := c.StartForward(msg.From, offer.SourceHost, offer.SourcePort, offer.TargetPort); err != nil {
+		c.sendRelay(msg.From, "reverse_forward_reject", ReverseForwardReject{
+			OfferID: offer.OfferID, Reason: err.Error(),
+		})
+		return
+	}
+
+	c.sendRelay(msg.From, "reverse_forward_accept", ReverseForwardAccept{
+		OfferID: offer.OfferID, TargetPort: offer.TargetPort,
+	})
+	c.emit(EventReverseForwardStarted, ForwardEvent{
+		LocalPort:  offer.TargetPort,
+		RemoteHost: offer.SourceHost,
+		RemotePort: offer.SourcePort,
+		PeerName:   shortID(msg.From),
+		Mode:       "REVERSE",
+	})
+}
+
+func (c *Client) handleReverseForwardAccept(msg Message) {
+	var accept ReverseForwardAccept
+	if err := json.Unmarshal(msg.Payload, &accept); err != nil {
+		return
+	}
+	c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("Reverse forward accepted: peer opened :%d", accept.TargetPort)})
+}
+
+func (c *Client) handleReverseForwardReject(msg Message) {
+	var reject ReverseForwardReject
+	if err := json.Unmarshal(msg.Payload, &reject); err != nil {
+		return
+	}
+	c.emit(EventLog, LogEvent{Level: "error", Message: fmt.Sprintf("Reverse forward rejected: %s", reject.Reason)})
 }

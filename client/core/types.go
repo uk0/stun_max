@@ -114,6 +114,48 @@ type TunnelRejected struct {
 	Reason   string `json:"reason"`
 }
 
+// ReverseForwardOffer is sent by B to ask A to open a local listener
+// that tunnels back to B's sourceHost:sourcePort.
+type ReverseForwardOffer struct {
+	OfferID    string `json:"offer_id"`
+	SourceHost string `json:"source_host"` // B's local target host
+	SourcePort int    `json:"source_port"` // B's local target port
+	TargetPort int    `json:"target_port"` // requested listener port on A
+}
+
+// ReverseForwardAccept is sent by A to confirm the reverse forward is active.
+type ReverseForwardAccept struct {
+	OfferID    string `json:"offer_id"`
+	TargetPort int    `json:"target_port"` // confirmed listener port on A
+}
+
+// ReverseForwardReject is sent by A when it cannot honour the offer.
+type ReverseForwardReject struct {
+	OfferID string `json:"offer_id"`
+	Reason  string `json:"reason"`
+}
+
+// HopForwardRequest is sent by A to B asking B to bridge to C:host:port.
+type HopForwardRequest struct {
+	HopID        string `json:"hop_id"`
+	TargetPeerID string `json:"target_peer_id"`
+	TargetHost   string `json:"target_host"`
+	TargetPort   int    `json:"target_port"`
+}
+
+// HopForwardAccept is sent by B back to A confirming the bridge is ready.
+// InboundTunnelID is the tunnel ID A must use when sending tunnel_data to B.
+type HopForwardAccept struct {
+	HopID           string `json:"hop_id"`
+	InboundTunnelID string `json:"inbound_tunnel_id"` // A uses this to send data to B
+}
+
+// HopForwardReject is sent by B when it cannot set up the bridge.
+type HopForwardReject struct {
+	HopID  string `json:"hop_id"`
+	Reason string `json:"reason"`
+}
+
 // SpeedTestRequest initiates a speed test with a peer.
 type SpeedTestRequest struct {
 	TestID    string `json:"test_id"`
@@ -143,6 +185,88 @@ type SpeedTestResult struct {
 	DownloadMbps float64
 	Done         bool
 	Error        string
+}
+
+// FileOffer is sent to propose a file transfer to a peer.
+type FileOffer struct {
+	TransferID string `json:"transfer_id"`
+	FileName   string `json:"file_name"`
+	FileSize   int64  `json:"file_size"`
+	FileHash   string `json:"file_hash"`
+}
+
+// FileAccept is sent to accept a pending file offer.
+type FileAccept struct {
+	TransferID string `json:"transfer_id"`
+}
+
+// FileReject is sent to reject a pending file offer.
+type FileReject struct {
+	TransferID string `json:"transfer_id"`
+	Reason     string `json:"reason"`
+}
+
+// FileData carries a compressed, base64-encoded chunk of file data.
+type FileData struct {
+	TransferID string `json:"transfer_id"`
+	Data       string `json:"data"`
+	Seq        int    `json:"seq"`
+	Offset     int64  `json:"offset"`
+}
+
+// FileDone signals that all chunks have been sent.
+type FileDone struct {
+	TransferID string `json:"transfer_id"`
+	TotalBytes int64  `json:"total_bytes"`
+}
+
+// FileCancel signals that a transfer has been cancelled.
+type FileCancel struct {
+	TransferID string `json:"transfer_id"`
+	Reason     string `json:"reason"`
+}
+
+// FileTransferInfo is a read-only snapshot of a file transfer for the GUI.
+type FileTransferInfo struct {
+	TransferID string
+	PeerID     string
+	PeerName   string
+	FileName   string
+	FileSize   int64
+	BytesDone  int64
+	Direction  string  // "send" or "receive"
+	Progress   float64 // 0.0 to 1.0
+	Speed      float64 // bytes/sec
+	Status     string  // "pending", "active", "complete", "error"
+}
+
+// TunSetup is exchanged between peers to negotiate VPN.
+type TunSetup struct {
+	VirtualIP string `json:"virtual_ip"` // assigned IP for this peer
+	PeerIP    string `json:"peer_ip"`    // assigned IP for the other peer
+	Subnet    string `json:"subnet"`     // e.g. "10.7.0.0/24"
+}
+
+// TunData carries a raw IP packet through the tunnel.
+type TunData struct {
+	Data string `json:"data"` // base64 of compressed IP packet
+}
+
+// TunTeardown signals VPN shutdown.
+type TunTeardown struct{}
+
+// TunInfo is a read-only snapshot of TUN state for the GUI.
+type TunInfo struct {
+	Enabled   bool
+	VirtualIP string
+	PeerIP    string
+	Subnet    string
+	PeerID    string
+	PeerName  string
+	BytesUp   int64
+	BytesDown int64
+	RateUp    float64
+	RateDown  float64
 }
 
 // ClientConfig holds all configuration needed to create a Client.

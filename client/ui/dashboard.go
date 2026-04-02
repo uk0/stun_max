@@ -19,22 +19,26 @@ type Tab int
 const (
 	TabPeers Tab = iota
 	TabForwards
+	TabFiles
+	TabVPN
 	TabSpeedTest
 	TabTools
 	TabSettings
 	TabLogs
 )
 
-var tabNames = [6]string{"Peers", "Forwards", "Speed Test", "Tools", "Settings", "Logs"}
+var tabNames = [8]string{"Peers", "Forwards", "Files", "VPN", "Speed Test", "Tools", "Settings", "Logs"}
 
 // DashboardScreen holds state for the main dashboard.
 type DashboardScreen struct {
 	ActiveTab     Tab
-	TabButtons    [6]widget.Clickable
+	TabButtons    [8]widget.Clickable
 	DisconnectBtn widget.Clickable
 
 	Peers     PeersPanel
 	Forwards  ForwardsPanel
+	Files     FilesPanel
+	VPN       VPNPanel
 	SpeedTest SpeedTestPanel
 	Tools     ToolsPanel
 	Settings  SettingsPanel
@@ -72,6 +76,10 @@ func (d *DashboardScreen) Layout(gtx layout.Context, th *material.Theme, a *App)
 					return d.Peers.Layout(gtx, th, a)
 				case TabForwards:
 					return d.Forwards.Layout(gtx, th, a)
+				case TabFiles:
+					return d.Files.Layout(gtx, th, a)
+				case TabVPN:
+					return d.VPN.Layout(gtx, th, a)
 				case TabSpeedTest:
 					return d.SpeedTest.Layout(gtx, th, a)
 				case TabTools:

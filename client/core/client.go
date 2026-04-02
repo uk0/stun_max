@@ -56,6 +56,19 @@ type Client struct {
 	speedTests   map[string]*activeSpeedTest
 	speedTestsMu sync.RWMutex
 
+	// File transfer tracking
+	fileTransfers   map[string]*activeFileTransfer
+	fileTransfersMu sync.RWMutex
+
+	// Multi-hop relay bridges (B's perspective: bridging A↔C)
+	hops              map[string]*HopBridge  // hopID → bridge
+	hopBridgeByTunnel map[string]*HopBridge  // tunnelID → bridge (both inbound and outbound)
+	hopsMu            sync.RWMutex
+
+	// TUN VPN
+	tunDevice *TunDevice
+	tunMu     sync.RWMutex
+
 	done chan struct{}
 	wg   sync.WaitGroup
 }
@@ -78,6 +91,9 @@ func NewClient(cfg ClientConfig) *Client {
 		tunnels:      make(map[string]*TunnelConn),
 		peerConns:    make(map[string]*PeerConn),
 		speedTests:   make(map[string]*activeSpeedTest),
+		fileTransfers: make(map[string]*activeFileTransfer),
+		hops:              make(map[string]*HopBridge),
+		hopBridgeByTunnel: make(map[string]*HopBridge),
 		allowForward: true,
 		localOnly:    true,
 		done:         make(chan struct{}),
@@ -170,6 +186,9 @@ func (c *Client) Disconnect() {
 		close(c.done)
 	}
 
+	// Stop TUN VPN if active
+	c.tunCleanup()
+
 	// Stop all forwards
 	c.forwardsMu.Lock()
 	ports := make([]int, 0, len(c.forwards))
@@ -194,6 +213,23 @@ func (c *Client) Disconnect() {
 		delete(c.tunnels, id)
 	}
 	c.tunnelsMu.Unlock()
+
+	// Close active file transfers
+	c.fileTransfersMu.Lock()
+	for id, ft := range c.fileTransfers {
+		ft.mu.Lock()
+		if ft.File != nil {
+			ft.File.Close()
+		}
+		select {
+		case <-ft.Done:
+		default:
+			close(ft.Done)
+		}
+		ft.mu.Unlock()
+		delete(c.fileTransfers, id)
+	}
+	c.fileTransfersMu.Unlock()
 
 	// Close UDP socket
 	if c.udpConn != nil {
@@ -677,6 +713,12 @@ func (c *Client) handleRelayData(msg Message) {
 		c.handleCloseTunnel(inner)
 	case "tunnel_rejected":
 		c.handleTunnelRejected(inner)
+	case "reverse_forward_offer":
+		c.handleReverseForwardOffer(inner)
+	case "reverse_forward_accept":
+		c.handleReverseForwardAccept(inner)
+	case "reverse_forward_reject":
+		c.handleReverseForwardReject(inner)
 	case "speed_test_request":
 		c.handleSpeedTestRequest(inner)
 	case "speed_test_ready":
@@ -685,6 +727,30 @@ func (c *Client) handleRelayData(msg Message) {
 		c.handleSpeedTestData(inner)
 	case "speed_test_done":
 		c.handleSpeedTestDone(inner)
+	case "file_offer":
+		c.handleFileOffer(inner)
+	case "file_accept":
+		c.handleFileAccept(inner)
+	case "file_data":
+		c.handleFileData(inner)
+	case "file_done":
+		c.handleFileDone(inner)
+	case "file_reject":
+		c.handleFileReject(inner)
+	case "file_cancel":
+		c.handleFileCancel(inner)
+	case "hop_forward":
+		c.handleHopForward(inner)
+	case "hop_forward_accept":
+		c.handleHopForwardAccept(inner)
+	case "hop_forward_reject":
+		c.handleHopForwardReject(inner)
+	case "tun_setup":
+		c.handleTunSetup(inner)
+	case "tun_data":
+		c.handleTunData(inner)
+	case "tun_teardown":
+		c.handleTunTeardown(inner)
 	}
 }
 

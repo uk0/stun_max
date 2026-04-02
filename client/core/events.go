@@ -23,6 +23,16 @@ const (
 	EventSpeedTestResult
 	EventLog
 	EventError
+	EventReverseForwardOffer
+	EventReverseForwardStarted
+	EventReverseForwardStopped
+	EventFileOffer
+	EventFileProgress
+	EventFileComplete
+	EventFileError
+	EventTunStarted
+	EventTunStopped
+	EventTunError
 )
 
 // Event is the unit of communication from Client to the GUI layer.
@@ -59,4 +69,34 @@ type SpeedTestProgressEvent struct {
 	PeerID   string
 	Phase    string  // "upload" or "download"
 	Progress float64 // 0.0 to 1.0
+}
+
+// FileOfferEvent is emitted when a peer offers a file.
+type FileOfferEvent struct {
+	TransferID string
+	PeerID     string
+	PeerName   string
+	FileName   string
+	FileSize   int64
+}
+
+// FileProgressEvent is emitted periodically during a file transfer.
+type FileProgressEvent struct {
+	TransferID string
+	Progress   float64
+	Speed      float64
+	BytesDone  int64
+}
+
+// FileCompleteEvent is emitted when a file transfer finishes.
+type FileCompleteEvent struct {
+	TransferID string
+	FileName   string
+	Direction  string
+}
+
+// FileErrorEvent is emitted when a file transfer fails.
+type FileErrorEvent struct {
+	TransferID string
+	Error      string
 }

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -165,6 +166,37 @@ func (a *App) handleEvent(evt core.Event) {
 	case core.EventSpeedTestProgress:
 		if p, ok := evt.Data.(core.SpeedTestProgressEvent); ok {
 			a.Dashboard.SpeedTest.handleProgress(p)
+		}
+	case core.EventFileOffer:
+		if fo, ok := evt.Data.(core.FileOfferEvent); ok {
+			a.Dashboard.Files.handleOffer(fo)
+			a.addLog("info", fmt.Sprintf("File offer from %s: %s", fo.PeerName, fo.FileName))
+		}
+	case core.EventFileProgress:
+		if fp, ok := evt.Data.(core.FileProgressEvent); ok {
+			a.Dashboard.Files.handleProgress(fp)
+		}
+	case core.EventFileComplete:
+		if fc, ok := evt.Data.(core.FileCompleteEvent); ok {
+			a.Dashboard.Files.handleComplete(fc)
+			a.addLog("info", fmt.Sprintf("File %s complete: %s", fc.Direction, fc.FileName))
+		}
+	case core.EventFileError:
+		if fe, ok := evt.Data.(core.FileErrorEvent); ok {
+			a.Dashboard.Files.handleError(fe)
+			a.addLog("error", fmt.Sprintf("File transfer error: %s", fe.Error))
+		}
+	case core.EventTunStarted:
+		if le, ok := evt.Data.(core.LogEvent); ok {
+			a.addLog("info", le.Message)
+		}
+	case core.EventTunStopped:
+		if le, ok := evt.Data.(core.LogEvent); ok {
+			a.addLog("info", le.Message)
+		}
+	case core.EventTunError:
+		if le, ok := evt.Data.(core.LogEvent); ok {
+			a.addLog("error", le.Message)
 		}
 	case core.EventDisconnected:
 		if le, ok := evt.Data.(core.LogEvent); ok {
