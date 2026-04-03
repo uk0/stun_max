@@ -1,4 +1,4 @@
-package main
+package natcheck
 
 import (
 	"bytes"
@@ -76,7 +76,8 @@ var defaultSTUNServers = []string{
 	"stun.l.google.com:19302",
 }
 
-func main() {
+// Run executes the NAT diagnostic CLI (parses flags from os.Args).
+func Run() {
 	servers := flag.String("servers", "", "comma-separated STUN servers (default: built-in list)")
 	verbose := flag.Bool("v", false, "verbose output")
 	flag.Parse()

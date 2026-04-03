@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -292,17 +294,53 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(stats)
 }
 
-func serveStatic(webDir string) http.HandlerFunc {
-	fs := http.FileServer(http.Dir(webDir))
-	return func(w http.ResponseWriter, r *http.Request) { fs.ServeHTTP(w, r) }
+func serveEmbedded(root fs.FS) http.HandlerFunc {
+	h := http.FileServer(http.FS(root))
+	return func(w http.ResponseWriter, r *http.Request) { h.ServeHTTP(w, r) }
+}
+
+func registerServeFlags(fs *flag.FlagSet) (addr, stunAddr, webPass *string, maxC *int64) {
+	addr = fs.String("addr", ":8080", "listen address")
+	stunAddr = fs.String("stun-addr", "", "if non-empty, also start embedded STUN server on this UDP address (e.g. :3478)")
+	webPass = fs.String("web-password", "", "dashboard password (empty=auto)")
+	maxC = fs.Int64("max-connections", 5000, "max WebSocket connections")
+	return
+}
+
+func printServerUsage() {
+	prog := os.Args[0]
+	fmt.Fprintf(os.Stderr, "Usage:\n  %s [flags]              HTTP signal server + admin dashboard\n", prog)
+	fmt.Fprintf(os.Stderr, "       %s natcheck [flags]  NAT type diagnostic (standalone)\n\n", prog)
+	fmt.Fprintf(os.Stderr, "HTTP server flags:\n")
+	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	registerServeFlags(fs)
+	fs.PrintDefaults()
+	fmt.Fprintf(os.Stderr, "\nRun \"%s natcheck -h\" for natcheck flags.\n", prog)
 }
 
 func main() {
-	addr := flag.String("addr", ":8080", "listen address")
-	webPass := flag.String("web-password", "", "dashboard password (empty=auto)")
-	webDir := flag.String("web-dir", "../web", "web static files")
-	maxC := flag.Int64("max-connections", 5000, "max WebSocket connections")
-	flag.Parse()
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "natcheck":
+			os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+			runNatcheck()
+			return
+		case "help", "-h", "--help":
+			printServerUsage()
+			return
+		}
+	}
+	runServe()
+}
+
+func runServe() {
+	flagSet := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	flagSet.SetOutput(os.Stderr)
+	addr, stunAddr, webPass, maxC := registerServeFlags(flagSet)
+	if err := flagSet.Parse(os.Args[1:]); err != nil {
+		log.Fatal(err)
+	}
 
 	maxConns = *maxC
 	hub = newHub()
@@ -315,10 +353,19 @@ func main() {
 		authToken = generateToken(16)
 	}
 
+	if *stunAddr != "" {
+		if err := startSTUNServer(*stunAddr); err != nil {
+			log.Fatalf("STUN server: %v", err)
+		}
+	}
+
 	fmt.Println("═══════════════════════════════════════")
 	fmt.Println("  STUN Max Server")
 	fmt.Println("═══════════════════════════════════════")
 	fmt.Printf("  Listen:     %s\n", *addr)
+	if *stunAddr != "" {
+		fmt.Printf("  STUN UDP:   %s\n", *stunAddr)
+	}
 	fmt.Printf("  Password:   %s\n", authToken)
 	fmt.Printf("  Max Conns:  %d\n", maxConns)
 	fmt.Println("═══════════════════════════════════════")
@@ -330,7 +377,11 @@ func main() {
 	http.HandleFunc("/api/rooms/unban", requireAuth(apiUnban))
 	http.HandleFunc("/api/auth", requireAuth(apiAuthCheck))
 	http.HandleFunc("/api/stats", requireAuth(apiStats))
-	http.HandleFunc("/", serveStatic(*webDir))
+	webFS, err := fs.Sub(embeddedWeb, "web")
+	if err != nil {
+		log.Fatal(err)
+	}
+	http.HandleFunc("/", serveEmbedded(webFS))
 
 	log.Printf("Server starting on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, nil))
