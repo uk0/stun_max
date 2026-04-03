@@ -20,7 +20,7 @@ import (
 
 // ForwardsPanel manages port forwards.
 type ForwardsPanel struct {
-	PeerEditor  widget.Editor
+	PeerSel     *PeerSelector
 	HostEditor  widget.Editor
 	LocalEditor widget.Editor
 	StartBtn    widget.Clickable
@@ -34,14 +34,14 @@ type ForwardsPanel struct {
 	// Expose (reverse forward) form
 	ExposeHostEditor   widget.Editor   // source host (your service)
 	ExposePortEditor   widget.Editor   // source port (your service)
-	ExposePeerEditor   widget.Editor   // target peer
+	ExposePeerSel      *PeerSelector   // target peer
 	ExposeRemoteEditor widget.Editor   // remote port on peer
 	ExposeBtn          widget.Clickable
 	ExposeError        string
 
 	// Hop forward form
-	HopViaEditor    widget.Editor // via (intermediate) peer
-	HopTargetEditor widget.Editor // target peer
+	HopViaSel       *PeerSelector // via (intermediate) peer
+	HopTargetSel    *PeerSelector // target peer
 	HopHostEditor   widget.Editor // target host:port
 	HopLocalEditor  widget.Editor // local port
 	HopBtn          widget.Clickable
@@ -55,7 +55,7 @@ func (f *ForwardsPanel) init() {
 		return
 	}
 	f.inited = true
-	f.PeerEditor.SingleLine = true
+	f.PeerSel = NewPeerSelector("Select peer")
 	f.HostEditor.SingleLine = true
 	f.LocalEditor.SingleLine = true
 	f.StopBtns = make(map[int]*widget.Clickable)
@@ -65,10 +65,10 @@ func (f *ForwardsPanel) init() {
 	f.List.Axis = layout.Vertical
 	f.ExposeHostEditor.SingleLine = true
 	f.ExposePortEditor.SingleLine = true
-	f.ExposePeerEditor.SingleLine = true
+	f.ExposePeerSel = NewPeerSelector("Select peer")
 	f.ExposeRemoteEditor.SingleLine = true
-	f.HopViaEditor.SingleLine = true
-	f.HopTargetEditor.SingleLine = true
+	f.HopViaSel = NewPeerSelector("Via peer")
+	f.HopTargetSel = NewPeerSelector("Target peer")
 	f.HopHostEditor.SingleLine = true
 	f.HopLocalEditor.SingleLine = true
 }
@@ -80,7 +80,7 @@ func (f *ForwardsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 	// Handle create new forward
 	if f.StartBtn.Clicked(gtx) && a.Client != nil {
 		f.Error = ""
-		peer := strings.TrimSpace(f.PeerEditor.Text())
+		peer := strings.TrimSpace(f.PeerSel.Text())
 		hostPort := strings.TrimSpace(f.HostEditor.Text())
 		localStr := strings.TrimSpace(f.LocalEditor.Text())
 
@@ -114,7 +114,7 @@ func (f *ForwardsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 								RemotePort: remotePort, LocalPort: localPort,
 								Enabled: true,
 							})
-							f.PeerEditor.SetText("")
+							f.PeerSel.Selected = ""
 							f.HostEditor.SetText("")
 							f.LocalEditor.SetText("")
 						}
@@ -127,7 +127,7 @@ func (f *ForwardsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 	// Handle expose (reverse forward)
 	if f.ExposeBtn.Clicked(gtx) && a.Client != nil {
 		f.ExposeError = ""
-		peer := strings.TrimSpace(f.ExposePeerEditor.Text())
+		peer := strings.TrimSpace(f.ExposePeerSel.Text())
 		hostStr := strings.TrimSpace(f.ExposeHostEditor.Text())
 		portStr := strings.TrimSpace(f.ExposePortEditor.Text())
 		remoteStr := strings.TrimSpace(f.ExposeRemoteEditor.Text())
@@ -156,7 +156,7 @@ func (f *ForwardsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 					if err := a.Client.ExposePort(peer, host, srcPort, remotePort); err != nil {
 						f.ExposeError = err.Error()
 					} else {
-						f.ExposePeerEditor.SetText("")
+						f.ExposePeerSel.Selected = ""
 						f.ExposeHostEditor.SetText("")
 						f.ExposePortEditor.SetText("")
 						f.ExposeRemoteEditor.SetText("")
@@ -169,8 +169,8 @@ func (f *ForwardsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 	// Handle hop forward
 	if f.HopBtn.Clicked(gtx) && a.Client != nil {
 		f.HopError = ""
-		via := strings.TrimSpace(f.HopViaEditor.Text())
-		target := strings.TrimSpace(f.HopTargetEditor.Text())
+		via := strings.TrimSpace(f.HopViaSel.Text())
+		target := strings.TrimSpace(f.HopTargetSel.Text())
 		hostPort := strings.TrimSpace(f.HopHostEditor.Text())
 		localStr := strings.TrimSpace(f.HopLocalEditor.Text())
 
@@ -198,8 +198,8 @@ func (f *ForwardsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 						if err := a.Client.StartHopForward(via, target, host, remotePort, localPort); err != nil {
 							f.HopError = err.Error()
 						} else {
-							f.HopViaEditor.SetText("")
-							f.HopTargetEditor.SetText("")
+							f.HopViaSel.Selected = ""
+							f.HopTargetSel.Selected = ""
 							f.HopHostEditor.SetText("")
 							f.HopLocalEditor.SetText("")
 						}
@@ -282,16 +282,16 @@ func (f *ForwardsPanel) Layout(gtx layout.Context, th *material.Theme, a *App) l
 
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return f.layoutForm(gtx, th)
+			return f.layoutForm(gtx, th, a)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return f.layoutExposeForm(gtx, th)
+				return f.layoutExposeForm(gtx, th, a)
 			})
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return f.layoutHopForm(gtx, th)
+				return f.layoutHopForm(gtx, th, a)
 			})
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -346,7 +346,7 @@ func (f *ForwardsPanel) startFwdBtn(port int) *widget.Clickable {
 	return f.StartFwdBtns[port]
 }
 
-func (f *ForwardsPanel) layoutForm(gtx layout.Context, th *material.Theme) layout.Dimensions {
+func (f *ForwardsPanel) layoutForm(gtx layout.Context, th *material.Theme, a *App) layout.Dimensions {
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
@@ -365,7 +365,7 @@ func (f *ForwardsPanel) layoutForm(gtx layout.Context, th *material.Theme) layou
 						return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceEvenly}.Layout(gtx,
 								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-									return layoutInputField(gtx, th, &f.PeerEditor, "Peer ID or name")
+									return f.PeerSel.Layout(gtx, th, a)
 								}),
 								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -571,7 +571,7 @@ func (f *ForwardsPanel) layoutStoppedCard(gtx layout.Context, th *material.Theme
 	)
 }
 
-func (f *ForwardsPanel) layoutExposeForm(gtx layout.Context, th *material.Theme) layout.Dimensions {
+func (f *ForwardsPanel) layoutExposeForm(gtx layout.Context, th *material.Theme, a *App) layout.Dimensions {
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
@@ -606,7 +606,7 @@ func (f *ForwardsPanel) layoutExposeForm(gtx layout.Context, th *material.Theme)
 								}),
 								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-									return layoutInputField(gtx, th, &f.ExposePeerEditor, "Peer ID or name")
+									return f.ExposePeerSel.Layout(gtx, th, a)
 								}),
 								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -641,7 +641,7 @@ func (f *ForwardsPanel) layoutExposeForm(gtx layout.Context, th *material.Theme)
 	)
 }
 
-func (f *ForwardsPanel) layoutHopForm(gtx layout.Context, th *material.Theme) layout.Dimensions {
+func (f *ForwardsPanel) layoutHopForm(gtx layout.Context, th *material.Theme, a *App) layout.Dimensions {
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
@@ -667,11 +667,11 @@ func (f *ForwardsPanel) layoutHopForm(gtx layout.Context, th *material.Theme) la
 						return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceEvenly}.Layout(gtx,
 								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-									return layoutInputField(gtx, th, &f.HopViaEditor, "Via peer")
+									return f.HopViaSel.Layout(gtx, th, a)
 								}),
 								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-									return layoutInputField(gtx, th, &f.HopTargetEditor, "Target peer")
+									return f.HopTargetSel.Layout(gtx, th, a)
 								}),
 								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {

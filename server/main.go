@@ -19,9 +19,10 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  64 * 1024,
-	WriteBufferSize: 64 * 1024,
+	ReadBufferSize:  256 * 1024,
+	WriteBufferSize: 256 * 1024,
 	CheckOrigin:     func(r *http.Request) bool { return true },
+	EnableCompression: true,
 }
 
 var (
@@ -155,9 +156,18 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 	}
 	atomic.AddInt64(&activeConns, 1)
 
-	clientID := generateID()
+	// Use client-provided ID if available (deterministic, MAC-based)
+	// Otherwise generate a random one
+	clientID := r.URL.Query().Get("client_id")
+	if clientID == "" {
+		clientID = generateID()
+	}
+
+	// If this client ID already exists, close the old connection (reconnect)
+	hub.disconnectExisting(clientID)
+
 	client := &Client{
-		hub: hub, conn: conn, send: make(chan []byte, 1024),
+		hub: hub, conn: conn, send: make(chan []byte, 4096),
 		id: clientID, status: "connecting",
 	}
 
@@ -302,6 +312,8 @@ func main() {
 	webPass := flag.String("web-password", "", "dashboard password (empty=auto)")
 	webDir := flag.String("web-dir", "../web", "web static files")
 	maxC := flag.Int64("max-connections", 5000, "max WebSocket connections")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file (enables HTTPS/WSS)")
+	tlsKey := flag.String("tls-key", "", "TLS private key file")
 	flag.Parse()
 
 	maxConns = *maxC
@@ -317,8 +329,13 @@ func main() {
 
 	fmt.Println("═══════════════════════════════════════")
 	fmt.Println("  STUN Max Server")
+	proto := "HTTP"
+	if *tlsCert != "" && *tlsKey != "" {
+		proto = "HTTPS"
+	}
+
 	fmt.Println("═══════════════════════════════════════")
-	fmt.Printf("  Listen:     %s\n", *addr)
+	fmt.Printf("  Listen:     %s (%s)\n", *addr, proto)
 	fmt.Printf("  Password:   %s\n", authToken)
 	fmt.Printf("  Max Conns:  %d\n", maxConns)
 	fmt.Println("═══════════════════════════════════════")
@@ -332,6 +349,10 @@ func main() {
 	http.HandleFunc("/api/stats", requireAuth(apiStats))
 	http.HandleFunc("/", serveStatic(*webDir))
 
-	log.Printf("Server starting on %s", *addr)
-	log.Fatal(http.ListenAndServe(*addr, nil))
+	log.Printf("Server starting on %s (%s)", *addr, proto)
+	if *tlsCert != "" && *tlsKey != "" {
+		log.Fatal(http.ListenAndServeTLS(*addr, *tlsCert, *tlsKey, nil))
+	} else {
+		log.Fatal(http.ListenAndServe(*addr, nil))
+	}
 }

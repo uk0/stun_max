@@ -19,11 +19,12 @@ type Message struct {
 
 // PeerInfo represents a peer's status visible to others
 type PeerInfo struct {
-	ID       string   `json:"id"`
-	Status   string   `json:"status"`             // "connecting", "direct", "relay", "disconnected"
-	Name     string   `json:"name,omitempty"`     // friendly name from CLI
-	Services []string `json:"services,omitempty"` // advertised host:port list
-	Endpoint string   `json:"endpoint,omitempty"` // STUN-discovered public UDP endpoint
+	ID       string            `json:"id"`
+	Status   string            `json:"status"`             // "connecting", "direct", "relay", "disconnected"
+	Name     string            `json:"name,omitempty"`     // friendly name from CLI
+	Services []string          `json:"services,omitempty"` // advertised host:port list
+	Endpoint string            `json:"endpoint,omitempty"` // STUN-discovered public UDP endpoint
+	Features map[string]string `json:"features,omitempty"` // active features: vpn, forwards, files, etc.
 }
 
 // RoomInfo is the API representation of a room for the web dashboard
@@ -170,6 +171,25 @@ func (h *Hub) findClient(id string) *Client {
 	return nil
 }
 
+// disconnectExisting closes an existing connection with the same client ID.
+// This handles reconnection: same machine reconnects, old connection is stale.
+func (h *Hub) disconnectExisting(clientID string) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, room := range h.rooms {
+		room.mu.Lock()
+		if old, ok := room.Clients[clientID]; ok {
+			// Close old connection — writePump/readPump will exit and trigger unregister
+			close(old.send)
+			old.conn.Close()
+			delete(room.Clients, clientID)
+			log.Printf("Disconnected stale connection for client %s (reconnecting)", clientID)
+		}
+		room.mu.Unlock()
+	}
+}
+
 func (r *Room) broadcast(msg []byte, exclude string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -230,6 +250,7 @@ func (r *Room) getPeerList() []PeerInfo {
 			Name:     c.name,
 			Services: c.services,
 			Endpoint: c.endpoint,
+			Features: c.features,
 		})
 	}
 	return peers

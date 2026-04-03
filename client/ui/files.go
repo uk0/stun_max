@@ -22,7 +22,7 @@ import (
 // FilesPanel manages file transfer UI.
 type FilesPanel struct {
 	PathEditor widget.Editor
-	PeerEditor widget.Editor
+	PeerSel    *PeerSelector
 	SendBtn    widget.Clickable
 	List       widget.List
 	Error      string
@@ -48,7 +48,7 @@ func (f *FilesPanel) init() {
 	}
 	f.inited = true
 	f.PathEditor.SingleLine = true
-	f.PeerEditor.SingleLine = true
+	f.PeerSel = NewPeerSelector("Select peer")
 	f.List.Axis = layout.Vertical
 	f.acceptBtns = make(map[string]*widget.Clickable)
 	f.rejectBtns = make(map[string]*widget.Clickable)
@@ -108,7 +108,7 @@ func (f *FilesPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layo
 
 	// Handle send button
 	if f.SendBtn.Clicked(gtx) && a.Client != nil {
-		peer := strings.TrimSpace(f.PeerEditor.Text())
+		peer := strings.TrimSpace(f.PeerSel.Text())
 		path := strings.TrimSpace(f.PathEditor.Text())
 		if peer == "" || path == "" {
 			f.Error = "Enter both peer and file path"
@@ -189,7 +189,7 @@ func (f *FilesPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layo
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			// Send form card
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return f.layoutSendForm(gtx, th, errMsg)
+				return f.layoutSendForm(gtx, th, a, errMsg)
 			}),
 			// Pending offers
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -205,7 +205,7 @@ func (f *FilesPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layo
 
 // PLACEHOLDER_SEND_FORM
 
-func (f *FilesPanel) layoutSendForm(gtx layout.Context, th *material.Theme, errMsg string) layout.Dimensions {
+func (f *FilesPanel) layoutSendForm(gtx layout.Context, th *material.Theme, a *App, errMsg string) layout.Dimensions {
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
@@ -224,7 +224,7 @@ func (f *FilesPanel) layoutSendForm(gtx layout.Context, th *material.Theme, errM
 						return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 								layout.Flexed(0.3, func(gtx layout.Context) layout.Dimensions {
-									return layoutInputField(gtx, th, &f.PeerEditor, "Peer ID or name")
+									return f.PeerSel.Layout(gtx, th, a)
 								}),
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 									return layout.Spacer{Width: unit.Dp(8)}.Layout(gtx)

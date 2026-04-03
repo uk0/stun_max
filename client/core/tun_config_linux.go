@@ -4,6 +4,7 @@ package core
 
 import (
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 
@@ -81,6 +82,33 @@ func addRoute(ifName, subnet, gateway string) error {
 	return exec.Command("ip", "route", "add", subnet, "via", gateway, "dev", ifName).Run()
 }
 
+func protectServerRoute(serverHost string) {
+	// Linux: add host route via default gateway
+	ips, err := net.LookupHost(serverHost)
+	if err != nil || len(ips) == 0 {
+		return
+	}
+	out, _ := exec.Command("ip", "route", "show", "default").CombinedOutput()
+	// Parse "default via X.X.X.X dev ethX"
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "default via ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				exec.Command("ip", "route", "add", ips[0]+"/32", "via", parts[2]).Run()
+			}
+			break
+		}
+	}
+}
+
+func removeServerRoute(serverHost string) {
+	ips, err := net.LookupHost(serverHost)
+	if err != nil || len(ips) == 0 {
+		return
+	}
+	exec.Command("ip", "route", "del", ips[0]+"/32").Run()
+}
+
 func removeRoute(ifName, subnet string) error {
 	return exec.Command("ip", "route", "del", subnet, "dev", ifName).Run()
 }
@@ -90,8 +118,7 @@ func enableIPForwarding() {
 }
 
 func enableNAT(ifName string) {
-	// Masquerade: packets from VPN subnet going out physical interfaces get source NAT
-	// This is the same as what a home router does
+	// Userspace SNAT handles NAT now — iptables MASQUERADE as backup
 	exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "10.7.0.0/24", "!", "-o", ifName, "-j", "MASQUERADE").Run()
 	exec.Command("iptables", "-A", "FORWARD", "-i", ifName, "-j", "ACCEPT").Run()
 	exec.Command("iptables", "-A", "FORWARD", "-o", ifName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT").Run()
@@ -101,6 +128,72 @@ func disableNAT(ifName string) {
 	exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", "10.7.0.0/24", "!", "-o", ifName, "-j", "MASQUERADE").Run()
 	exec.Command("iptables", "-D", "FORWARD", "-i", ifName, "-j", "ACCEPT").Run()
 	exec.Command("iptables", "-D", "FORWARD", "-o", ifName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT").Run()
+}
+
+// detectExitIP finds the local IP address that can reach the given subnet.
+func detectExitIP(subnet string) net.IP {
+	_, ipNet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return nil
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			if ipNet.Contains(ip) {
+				return ip
+			}
+		}
+	}
+	return nil
+}
+
+func pickSNATIP(subnet string, exitIP net.IP) net.IP {
+	_, ipNet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return nil
+	}
+	base := ipNet.IP.To4()
+	if base == nil {
+		return nil
+	}
+	for i := 254; i >= 200; i-- {
+		candidate := net.IPv4(base[0], base[1], base[2], byte(i))
+		if exitIP != nil && candidate.Equal(exitIP) {
+			continue
+		}
+		return candidate
+	}
+	return nil
+}
+
+func setupSNATRoute(ifName string, snatIP net.IP) {
+	exec.Command("ip", "route", "add", snatIP.String()+"/32", "dev", ifName).Run()
+}
+
+func cleanupSNATRoute(ifName string, snatIP net.IP) {
+	if snatIP != nil {
+		exec.Command("ip", "route", "del", snatIP.String()+"/32", "dev", ifName).Run()
+	}
 }
 
 func checkForwardingStatus() string {

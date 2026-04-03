@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,8 +19,9 @@ import (
 // Client holds all state for the networking core.
 type Client struct {
 	// Exported config (read-only after creation)
-	Config ClientConfig
-	MyID   string
+	Config    ClientConfig
+	MyID      string
+	MachineID string // deterministic ID from MAC + name
 
 	// Event channel for GUI consumption
 	events chan Event
@@ -66,8 +68,17 @@ type Client struct {
 	hopsMu            sync.RWMutex
 
 	// TUN VPN
-	tunDevice *TunDevice
-	tunMu     sync.RWMutex
+	tunDevice  *TunDevice
+	tunMu      sync.RWMutex
+	tunAckCh   chan string // receives B's virtual IP from tun_ack
+
+	// Per-peer gVisor netstack for port forwarding
+	fwdNetstacks   map[string]*forwardNetstack // peerID → netstack
+	fwdNetstacksMu sync.RWMutex
+
+	// Peer leave debounce: delay "peer left" to handle brief disconnects
+	pendingLeaves   map[string]*time.Timer // name → cancel timer
+	pendingLeavesMu sync.Mutex
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -80,8 +91,13 @@ func NewClient(cfg ClientConfig) *Client {
 		h := sha256.Sum256([]byte(cfg.Password))
 		hash = hex.EncodeToString(h[:])
 	}
+
+	// Generate deterministic client ID from MAC address + name
+	machineID := generateMachineID(cfg.Name)
+
 	return &Client{
 		Config:       cfg,
+		MachineID:    machineID,
 		events:       make(chan Event, 256),
 		room:         cfg.Room,
 		passwordHash: hash,
@@ -94,6 +110,8 @@ func NewClient(cfg ClientConfig) *Client {
 		fileTransfers: make(map[string]*activeFileTransfer),
 		hops:              make(map[string]*HopBridge),
 		hopBridgeByTunnel: make(map[string]*HopBridge),
+		pendingLeaves: make(map[string]*time.Timer),
+		fwdNetstacks:  make(map[string]*forwardNetstack),
 		allowForward: true,
 		localOnly:    true,
 		done:         make(chan struct{}),
@@ -103,6 +121,35 @@ func NewClient(cfg ClientConfig) *Client {
 // Events returns the read-only event channel.
 func (c *Client) Events() <-chan Event {
 	return c.events
+}
+
+// ReportFeatures sends current active features to the server for dashboard display.
+func (c *Client) ReportFeatures() {
+	features := make(map[string]string)
+
+	// VPN status
+	c.tunMu.RLock()
+	if c.tunDevice != nil {
+		features["vpn"] = c.tunDevice.peerName
+		if len(c.tunDevice.routes) > 0 {
+			features["vpn_routes"] = fmt.Sprintf("%v", c.tunDevice.routes)
+		}
+	}
+	c.tunMu.RUnlock()
+
+	// Forward count
+	c.forwardsMu.RLock()
+	if len(c.forwards) > 0 {
+		features["forwards"] = fmt.Sprintf("%d", len(c.forwards))
+	}
+	c.forwardsMu.RUnlock()
+
+	featJSON, _ := json.Marshal(features)
+	c.sendMsg(Message{
+		Type:    "feature_update",
+		Room:    c.room,
+		Payload: json.RawMessage(featJSON),
+	})
 }
 
 // emit sends an event to the GUI in a non-blocking fashion.
@@ -118,7 +165,16 @@ func (c *Client) Connect() error {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 	}
-	conn, _, err := dialer.Dial(c.Config.ServerURL, nil)
+	// Pass machine ID as query parameter so server uses it as client ID
+	serverURL := c.Config.ServerURL
+	if c.MachineID != "" {
+		sep := "?"
+		if strings.Contains(serverURL, "?") {
+			sep = "&"
+		}
+		serverURL += sep + "client_id=" + c.MachineID
+	}
+	conn, _, err := dialer.Dial(serverURL, nil)
 	if err != nil {
 		return fmt.Errorf("dial failed: %w", err)
 	}
@@ -152,11 +208,56 @@ func (c *Client) Connect() error {
 
 	c.emit(EventConnected, LogEvent{Level: "info", Message: fmt.Sprintf("Connected, ID: %s", c.MyID)})
 
+	// Setup WebSocket keepalive (ping/pong)
+	c.setupWSKeepAlive()
+
 	// Start WebSocket read loop
 	c.wg.Add(1)
 	go c.readLoop()
 
 	return nil
+}
+
+// setupWSKeepAlive configures ping/pong handlers and starts a ping sender goroutine.
+// This keeps the WebSocket connection alive through NATs and load balancers.
+func (c *Client) setupWSKeepAlive() {
+	const pingPeriod = 30 * time.Second
+
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
+		return
+	}
+
+	// No ReadDeadline on client side — we rely on ping/pong for liveness.
+	// Setting ReadDeadline causes false disconnects when VPN data flows heavily.
+	conn.SetReadDeadline(time.Time{}) // clear any deadline
+
+	// Start ping sender goroutine — keeps NAT/firewall mappings alive
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-c.done:
+				return
+			case <-ticker.C:
+				c.connMu.Lock()
+				curConn := c.conn
+				c.connMu.Unlock()
+				if curConn != conn {
+					return // connection was replaced (reconnect), stop this goroutine
+				}
+				c.connMu.Lock()
+				err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second))
+				c.connMu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
 }
 
 // JoinRoom sends the join message to the server.
@@ -423,11 +524,61 @@ func (c *Client) sendRelay(to string, innerType string, innerPayload interface{}
 	if err != nil {
 		return err
 	}
+
+	// E2E encrypt relay data if we have a shared key with this peer
+	// (skip key_exchange messages — they establish the key)
+	finalPayload := envelope
+	if innerType != "key_exchange" {
+		c.peerConnsMu.RLock()
+		pc, ok := c.peerConns[to]
+		c.peerConnsMu.RUnlock()
+		if ok && pc.Crypto != nil && pc.Crypto.Encrypted {
+			encrypted, err := pc.Crypto.Encrypt(envelope)
+			if err == nil {
+				// Wrap in encrypted envelope
+				encEnv, _ := json.Marshal(RelayEnvelope{
+					Type:    "encrypted",
+					Payload: json.RawMessage(`"` + base64.StdEncoding.EncodeToString(encrypted) + `"`),
+				})
+				finalPayload = encEnv
+			}
+		}
+	}
+
 	return c.sendMsg(Message{
 		Type:    "relay_data",
 		To:      to,
-		Payload: json.RawMessage(envelope),
+		Payload: json.RawMessage(finalPayload),
 	})
+}
+
+// sendViaP2P sends a message to a peer via UDP P2P first, relay as fallback.
+// prefix: UDP frame prefix (e.g. "SM:", "ST:", "SF:")
+// udpPayload: raw bytes to send via UDP (prefix + payload)
+// relayType/relayPayload: for relay fallback
+func (c *Client) sendViaP2P(peerID string, udpPayload []byte, relayType string, relayPayload interface{}) {
+	// Try UDP P2P
+	c.peerConnsMu.RLock()
+	pc := c.peerConns[peerID]
+	var addr *net.UDPAddr
+	if pc != nil && pc.Mode == "direct" && pc.UDPAddr != nil {
+		addr = pc.UDPAddr
+	}
+	c.peerConnsMu.RUnlock()
+
+	if addr != nil {
+		c.connMu.Lock()
+		udp := c.udpConn
+		c.connMu.Unlock()
+		if udp != nil {
+			if _, err := udp.WriteToUDP(udpPayload, addr); err == nil {
+				return
+			}
+		}
+	}
+
+	// Fallback to relay
+	c.sendRelay(peerID, relayType, relayPayload)
 }
 
 // sendTunnelData sends tunnel data via WebSocket relay.
@@ -497,6 +648,13 @@ func (c *Client) reconnect() bool {
 
 		// Use saved config for connection parameters
 		serverURL := c.Config.ServerURL
+		if c.MachineID != "" {
+			sep := "?"
+			if strings.Contains(serverURL, "?") {
+				sep = "&"
+			}
+			serverURL += sep + "client_id=" + c.MachineID
+		}
 		room := c.room
 		passHash := c.passwordHash
 		name := c.name
@@ -551,6 +709,9 @@ func (c *Client) reconnect() bool {
 		// Reset all P2P state — old connections are dead after network change
 		c.resetP2PState()
 
+		// Setup keepalive on new connection
+		c.setupWSKeepAlive()
+
 		// Re-discover STUN (network may have changed, old public addr is stale)
 		if !c.Config.NoSTUN {
 			servers := c.Config.STUNServers
@@ -588,6 +749,21 @@ func (c *Client) resetP2PState() {
 		pc.Crypto = nil
 	}
 	c.peerConnsMu.Unlock()
+}
+
+// generateMachineID creates a deterministic client ID from MAC address + name.
+// Same machine + same name = same ID across restarts and reconnects.
+func generateMachineID(name string) string {
+	mac := getPrimaryMAC()
+	var seed string
+	if mac != nil {
+		seed = mac.String() + ":" + name
+	} else {
+		h, _ := os.Hostname()
+		seed = h + ":" + name
+	}
+	hash := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(hash[:8]) // 16-char hex ID
 }
 
 func splitMessages(data []byte) [][]byte {
@@ -635,12 +811,20 @@ func (c *Client) handlePeerList(msg Message) {
 
 	// Build maps for join/leave detection
 	oldMap := make(map[string]bool)
+	oldNameMap := make(map[string]string) // name → ID
 	for _, p := range oldPeers {
 		oldMap[p.ID] = true
+		if p.Name != "" {
+			oldNameMap[p.Name] = p.ID
+		}
 	}
 	newMap := make(map[string]bool)
+	newNameMap := make(map[string]string) // name → ID
 	for _, p := range peers {
 		newMap[p.ID] = true
+		if p.Name != "" {
+			newNameMap[p.Name] = p.ID
+		}
 	}
 
 	// Detect new peers and send stun_info
@@ -673,18 +857,100 @@ func (c *Client) handlePeerList(msg Message) {
 		}
 	}
 
-	// Detect peers that left
+	// Cancel pending leaves for peers that are back
+	c.pendingLeavesMu.Lock()
+	for name, timer := range c.pendingLeaves {
+		if _, back := newNameMap[name]; back {
+			timer.Stop()
+			delete(c.pendingLeaves, name)
+		}
+	}
+	c.pendingLeavesMu.Unlock()
+
+	// Detect peers that left (debounced — wait 5s before confirming)
 	for _, p := range oldPeers {
 		if !newMap[p.ID] && p.ID != c.MyID {
+			// Check if same name still present (reconnected with new ID)
+			if p.Name != "" {
+				if newID, ok := newNameMap[p.Name]; ok {
+					// Update VPN peer ID if needed
+					c.tunMu.Lock()
+					if c.tunDevice != nil && c.tunDevice.peerID == p.ID {
+						c.tunDevice.peerID = newID
+						c.tunMu.Unlock()
+						c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("VPN peer %s reconnected with new ID", p.Name)})
+					} else {
+						c.tunMu.Unlock()
+					}
+					continue
+				}
+			}
+
+			// Debounce: schedule peer_left after 5 seconds
+			peerCopy := p
 			displayName := p.Name
 			if displayName == "" {
 				displayName = shortID(p.ID)
 			}
-			c.emit(EventPeerLeft, PeerEvent{ID: p.ID, Name: displayName})
 
-			c.peerConnsMu.Lock()
-			delete(c.peerConns, p.ID)
-			c.peerConnsMu.Unlock()
+			c.pendingLeavesMu.Lock()
+			if _, pending := c.pendingLeaves[displayName]; !pending {
+				c.pendingLeaves[displayName] = time.AfterFunc(5*time.Second, func() {
+					c.pendingLeavesMu.Lock()
+					delete(c.pendingLeaves, displayName)
+					c.pendingLeavesMu.Unlock()
+
+					// Re-check: is this peer (by name) still absent?
+					c.peersMu.RLock()
+					stillGone := true
+					for _, cur := range c.peers {
+						if cur.Name == peerCopy.Name && peerCopy.Name != "" {
+							stillGone = false
+							break
+						}
+						if cur.ID == peerCopy.ID {
+							stillGone = false
+							break
+						}
+					}
+					c.peersMu.RUnlock()
+
+					if !stillGone {
+						return // peer came back, skip
+					}
+
+					c.emit(EventPeerLeft, PeerEvent{ID: peerCopy.ID, Name: displayName})
+
+					c.peerConnsMu.Lock()
+					delete(c.peerConns, peerCopy.ID)
+					c.peerConnsMu.Unlock()
+
+					// Clean up VPN if this peer was our VPN partner
+					c.tunMu.Lock()
+					if c.tunDevice != nil && c.tunDevice.peerID == peerCopy.ID {
+						dev := c.tunDevice
+						c.tunDevice = nil
+						c.tunMu.Unlock()
+						dev.closeOnce.Do(func() { close(dev.done) })
+						if dev.proxy != nil {
+							dev.proxy.Close()
+						}
+						if dev.iface != nil {
+							dev.iface.Close()
+						}
+						for _, route := range dev.routes {
+							removeRoute(dev.ifName, route)
+						}
+						cleanupSNATRoute(dev.ifName, dev.snatIP)
+						disableNAT(dev.ifName)
+						removeTunInterface(dev.ifName)
+						c.emit(EventTunStopped, LogEvent{Level: "info", Message: "VPN stopped: peer disconnected"})
+					} else {
+						c.tunMu.Unlock()
+					}
+				})
+			}
+			c.pendingLeavesMu.Unlock()
 		}
 	}
 
@@ -696,6 +962,33 @@ func (c *Client) handleRelayData(msg Message) {
 	if err := json.Unmarshal(msg.Payload, &envelope); err != nil {
 		return
 	}
+
+	// Decrypt E2E encrypted relay data
+	if envelope.Type == "encrypted" {
+		var encData string
+		if err := json.Unmarshal(envelope.Payload, &encData); err != nil {
+			return
+		}
+		ciphertext, err := base64.StdEncoding.DecodeString(encData)
+		if err != nil {
+			return
+		}
+		c.peerConnsMu.RLock()
+		pc, ok := c.peerConns[msg.From]
+		c.peerConnsMu.RUnlock()
+		if !ok || pc.Crypto == nil || !pc.Crypto.Encrypted {
+			return // can't decrypt without key
+		}
+		plaintext, err := pc.Crypto.Decrypt(ciphertext)
+		if err != nil {
+			return
+		}
+		// Re-parse the decrypted envelope
+		if err := json.Unmarshal(plaintext, &envelope); err != nil {
+			return
+		}
+	}
+
 	inner := Message{
 		Type:    envelope.Type,
 		From:    msg.From,
@@ -720,13 +1013,21 @@ func (c *Client) handleRelayData(msg Message) {
 	case "reverse_forward_reject":
 		c.handleReverseForwardReject(inner)
 	case "speed_test_request":
-		c.handleSpeedTestRequest(inner)
+		c.handleSTBegin(inner) // legacy compat
+	case "st_begin":
+		c.handleSTBegin(inner)
 	case "speed_test_ready":
-		c.handleSpeedTestReady(inner)
+		c.handleSTReady(inner) // legacy compat
+	case "st_ready":
+		c.handleSTReady(inner)
 	case "speed_test_data":
 		c.handleSpeedTestData(inner)
 	case "speed_test_done":
-		c.handleSpeedTestDone(inner)
+		c.handleSTFinish(inner) // legacy compat
+	case "st_finish":
+		c.handleSTFinish(inner)
+	case "st_result":
+		c.handleSTResult(inner)
 	case "file_offer":
 		c.handleFileOffer(inner)
 	case "file_accept":
@@ -747,10 +1048,14 @@ func (c *Client) handleRelayData(msg Message) {
 		c.handleHopForwardReject(inner)
 	case "tun_setup":
 		c.handleTunSetup(inner)
+	case "tun_ack":
+		c.handleTunAck(inner)
 	case "tun_data":
 		c.handleTunData(inner)
 	case "tun_teardown":
 		c.handleTunTeardown(inner)
+	case "fwd_data":
+		c.handleFwdData(inner)
 	}
 }
 

@@ -17,9 +17,16 @@ type SavedConfig struct {
 	NoSTUN       bool           `json:"no_stun,omitempty"`
 	Autostart    bool           `json:"autostart,omitempty"`
 	AutoConnect  bool           `json:"auto_connect,omitempty"`
-	AllowForward *bool          `json:"allow_forward,omitempty"` // nil = default true
-	LocalOnly    *bool          `json:"local_only,omitempty"`    // nil = default true
+	AllowForward *bool          `json:"allow_forward,omitempty"`
+	LocalOnly    *bool          `json:"local_only,omitempty"`
+	VirtualIP    string         `json:"virtual_ip,omitempty"`
 	Forwards     []SavedForward `json:"forwards,omitempty"`
+
+	// VPN settings
+	VPNPeer    string   `json:"vpn_peer,omitempty"`
+	VPNRoutes  []string `json:"vpn_routes,omitempty"`
+	VPNExitIP  string   `json:"vpn_exit_ip,omitempty"`
+	VPNAutoStart bool   `json:"vpn_auto_start,omitempty"`
 }
 
 // SavedForward persists a forward rule.

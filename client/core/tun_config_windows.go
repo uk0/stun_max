@@ -4,6 +4,7 @@ package core
 
 import (
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -80,6 +81,37 @@ func addRoute(ifName, subnet, gateway string) error {
 	return runSilentErr("netsh", "interface", "ip", "add", "route", subnet, ifName, gateway)
 }
 
+// protectServerRoute adds a specific host route for the server IP through the
+// default gateway, ensuring WebSocket traffic is never routed through TUN.
+func protectServerRoute(serverHost string) {
+	// Resolve server hostname to IP
+	ips, err := net.LookupHost(serverHost)
+	if err != nil || len(ips) == 0 {
+		return
+	}
+	serverIP := ips[0]
+
+	// Find default gateway
+	out, _ := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1).NextHop`).CombinedOutput()
+	gw := strings.TrimSpace(string(out))
+	if gw == "" || gw == "0.0.0.0" {
+		return
+	}
+
+	// Add host route for server IP via default gateway
+	runSilent("route", "add", serverIP, "mask", "255.255.255.255", gw, "metric", "1")
+}
+
+// removeServerRoute removes the protected server route.
+func removeServerRoute(serverHost string) {
+	ips, err := net.LookupHost(serverHost)
+	if err != nil || len(ips) == 0 {
+		return
+	}
+	runSilent("route", "delete", ips[0], "mask", "255.255.255.255")
+}
+
 func removeRoute(ifName, subnet string) error {
 	runSilent("netsh", "interface", "ip", "delete", "route", subnet, ifName)
 	return nil
@@ -106,75 +138,132 @@ func checkForwardingStatus() string {
 }
 
 func enableIPForwarding() {
-	// Method 1: Per-interface forwarding (immediate)
+	// Only enable forwarding on the TUN interface and the physical interface
+	// Do NOT blanket-enable on all interfaces — it disrupts WebSocket connections
 	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		`Get-NetAdapter | ForEach-Object { Set-NetIPInterface -InterfaceIndex $_.ifIndex -Forwarding Enabled -ErrorAction SilentlyContinue }`)
-	// Method 2: Registry (persistent)
+		`Get-NetAdapter | Where-Object { $_.Name -like 'StunMax*' -or $_.Name -like 'Ethernet*' -or $_.Name -like 'Wi-Fi*' } | ForEach-Object { Set-NetIPInterface -InterfaceIndex $_.ifIndex -Forwarding Enabled -ErrorAction SilentlyContinue }`)
+	// Registry (persistent)
 	runSilent("reg", "add", `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters`,
 		"/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "1", "/f")
-	// Method 3: RRAS service
-	runSilent("sc", "config", "RemoteAccess", "start=", "auto")
-	runSilent("net", "start", "RemoteAccess")
-	// Method 4: Allow forwarding through Windows Firewall
+}
+
+func enableNAT(ifName string) {
+	// Userspace SNAT handles NAT now — no kernel NAT needed.
+	// Just ensure forwarding and firewall allow forwarded packets.
 	runSilent("netsh", "advfirewall", "firewall", "add", "rule",
 		"name=StunMax-Forward", "dir=in", "action=allow", "enable=yes",
 		"profile=any", "protocol=any")
 	runSilent("netsh", "advfirewall", "firewall", "add", "rule",
 		"name=StunMax-Forward-Out", "dir=out", "action=allow", "enable=yes",
 		"profile=any", "protocol=any")
-	// Disable firewall on TUN profile to allow forwarded packets
-	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		`Set-NetFirewallProfile -All -Enabled False -ErrorAction SilentlyContinue`)
-}
-
-func enableNAT(ifName string) {
-	// Method 1: New-NetNat (requires Hyper-V on some Win10 versions)
-	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		`Remove-NetNat -Name StunMaxNAT -Confirm:$false -ErrorAction SilentlyContinue`)
-	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		`New-NetNat -Name StunMaxNAT -InternalIPInterfaceAddressPrefix "10.7.0.0/24" -ErrorAction SilentlyContinue`)
-
-	// Method 2: ICS (Internet Connection Sharing) — most reliable on Win10
-	// Share the physical adapter's internet with the TUN interface
-	runSilent("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-		`$m = New-Object -ComObject HNetCfg.HNetShare; `+
-			`$conns = $m.EnumEveryConnection; `+
-			`foreach($c in $conns) { `+
-			`  try { `+
-			`    $props = $m.NetConnectionProps($c); `+
-			`    $cfg = $m.INetSharingConfigurationForINetConnection($c); `+
-			`    if($props.Name -eq '`+ifName+`') { `+
-			`      $cfg.EnableSharing(1) `+ // 1 = private (receives shared internet)
-			`    } elseif($props.Status -eq 2 -and $props.Name -ne '`+ifName+`') { `+
-			`      $cfg.EnableSharing(0) `+ // 0 = public (shares its internet)
-			`    } `+
-			`  } catch {} `+
-			`}`)
-
-	// Method 3: Add explicit route for return traffic
-	// Ensure 10.7.0.0/24 replies go back through TUN
-	runSilent("netsh", "interface", "ip", "add", "route", "10.7.0.0/24", ifName)
 }
 
 func disableNAT(ifName string) {
-	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		`Remove-NetNat -Name StunMaxNAT -Confirm:$false -ErrorAction SilentlyContinue`)
-	// Disable ICS
-	runSilent("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-		`$m = New-Object -ComObject HNetCfg.HNetShare; `+
-			`$conns = $m.EnumEveryConnection; `+
-			`foreach($c in $conns) { `+
-			`  try { `+
-			`    $cfg = $m.INetSharingConfigurationForINetConnection($c); `+
-			`    $cfg.DisableSharing() `+
-			`  } catch {} `+
-			`}`)
-	// Re-enable firewall
-	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		`Set-NetFirewallProfile -All -Enabled True -ErrorAction SilentlyContinue`)
-	// Disable forwarding
-	runSilent("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		`Get-NetAdapter | ForEach-Object { Set-NetIPInterface -InterfaceIndex $_.ifIndex -Forwarding Disabled -ErrorAction SilentlyContinue }`)
+	runSilent("netsh", "advfirewall", "firewall", "delete", "rule", "name=StunMax-Forward")
+	runSilent("netsh", "advfirewall", "firewall", "delete", "rule", "name=StunMax-Forward-Out")
+}
+
+// detectExitIP finds the local IP address that can reach the given subnet.
+func detectExitIP(subnet string) net.IP {
+	_, ipNet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return nil
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			if ipNet.Contains(ip) {
+				return ip
+			}
+		}
+	}
+	return nil
+}
+
+// pickSNATIP picks a phantom IP in the target subnet for SNAT.
+// Uses .254, .253, etc. avoiding the exitIP and common addresses.
+func pickSNATIP(subnet string, exitIP net.IP) net.IP {
+	_, ipNet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return nil
+	}
+	base := ipNet.IP.To4()
+	if base == nil {
+		return nil
+	}
+	// Try .254, .253, .252 ...
+	for i := 254; i >= 200; i-- {
+		candidate := net.IPv4(base[0], base[1], base[2], byte(i))
+		if exitIP != nil && candidate.Equal(exitIP) {
+			continue
+		}
+		return candidate
+	}
+	return nil
+}
+
+// setupSNATRoute adds a host route for the SNAT IP pointing to the TUN interface.
+// NOTE: We do NOT add the SNAT IP as a secondary address on TUN — that causes
+// Windows to think TUN is on the physical subnet, disrupting WebSocket connections.
+func setupSNATRoute(ifName string, snatIP net.IP) {
+	s := snatIP.String()
+	idx := getInterfaceIndex(ifName)
+
+	// Add host route via TUN interface with low metric
+	runSilent("route", "add", s, "mask", "255.255.255.255",
+		"0.0.0.0", "metric", "1", "if", idx)
+	runSilent("netsh", "interface", "ip", "add", "route",
+		s+"/32", ifName, "0.0.0.0", "metric=1")
+}
+
+// getInterfaceIndex returns the Windows interface index for a given name.
+func getInterfaceIndex(ifName string) string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "0"
+	}
+	for _, iface := range ifaces {
+		if iface.Name == ifName {
+			return fmt.Sprintf("%d", iface.Index)
+		}
+	}
+	// Try partial match (Wintun names may differ)
+	for _, iface := range ifaces {
+		if strings.Contains(iface.Name, ifName) || strings.Contains(ifName, iface.Name) {
+			return fmt.Sprintf("%d", iface.Index)
+		}
+	}
+	return "0"
+}
+
+// cleanupSNATRoute removes the SNAT routes.
+func cleanupSNATRoute(ifName string, snatIP net.IP) {
+	if snatIP == nil {
+		return
+	}
+	s := snatIP.String()
+	runSilent("route", "delete", s)
+	runSilent("netsh", "interface", "ip", "delete", "route", s+"/32", ifName)
 }
 
 func runSilent(name string, args ...string) {

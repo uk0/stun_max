@@ -7,6 +7,7 @@
 docs/
 CLAUDE.md
 build/
+build.zip
 stun_max-*
 natcheck-*
 *.exe

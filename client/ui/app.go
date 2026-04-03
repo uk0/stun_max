@@ -63,6 +63,11 @@ func NewApp() *App {
 	// Always load config into connect form first
 	a.Connect.init()
 
+	// Restore persisted VirtualIP
+	if cfg := LoadConfig(); cfg != nil && cfg.VirtualIP != "" {
+		core.SetVirtualIP(cfg.VirtualIP)
+	}
+
 	// Try auto-connect if config exists and auto_connect is enabled
 	if cfg := LoadConfig(); cfg != nil && cfg.AutoConnect && cfg.ServerURL != "" && cfg.Room != "" {
 		go func() {
@@ -325,13 +330,18 @@ func (a *App) DoConnect(cfg core.ClientConfig) {
 			Name:        cfg.Name,
 			STUNServers: cfg.STUNServers,
 			NoSTUN:      cfg.NoSTUN,
-			AutoConnect: true, // successfully connected = enable auto-connect
+			AutoConnect: true,
 		}
 		if prev := LoadConfig(); prev != nil {
 			saved.Forwards = prev.Forwards
 			saved.Autostart = prev.Autostart
 			saved.AllowForward = prev.AllowForward
 			saved.LocalOnly = prev.LocalOnly
+			saved.VirtualIP = prev.VirtualIP
+			saved.VPNPeer = prev.VPNPeer
+			saved.VPNRoutes = prev.VPNRoutes
+			saved.VPNExitIP = prev.VPNExitIP
+			saved.VPNAutoStart = prev.VPNAutoStart
 		}
 		SaveConfig(saved)
 
@@ -389,6 +399,15 @@ func (a *App) DoConnect(cfg core.ClientConfig) {
 				if sf.Enabled {
 					client.StartForward(sf.PeerName, sf.RemoteHost, sf.RemotePort, sf.LocalPort)
 				}
+			}
+		}()
+
+		// Auto-start VPN if configured
+		go func() {
+			vpnCfg := LoadConfig()
+			if vpnCfg != nil && vpnCfg.VPNAutoStart && vpnCfg.VPNPeer != "" {
+				time.Sleep(5 * time.Second)
+				client.StartTun(vpnCfg.VPNPeer, vpnCfg.VPNRoutes, vpnCfg.VPNExitIP)
 			}
 		}()
 

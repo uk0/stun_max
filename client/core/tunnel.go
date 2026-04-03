@@ -4,8 +4,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,6 +80,13 @@ func (c *Client) getForwardMode(peerID string) string {
 	return "RELAY"
 }
 
+// virtualPortCounter allocates unique virtual ports for forward netstack connections.
+var virtualPortCounter uint32 = 10000
+
+func nextVirtualPort() uint16 {
+	return uint16(atomic.AddUint32(&virtualPortCounter, 1))
+}
+
 func (c *Client) acceptLoop(fwd *Forward) {
 	defer c.wg.Done()
 	defer fwd.Listener.Close()
@@ -104,32 +113,93 @@ func (c *Client) acceptLoop(fwd *Forward) {
 		}
 		optimizeTCP(conn)
 
-		tunnelID := generateTunnelID()
-		tc := &TunnelConn{
-			TunnelID: tunnelID, PeerID: fwd.PeerID,
-			Conn: conn, Forward: fwd, Done: make(chan struct{}),
+		// Get or create gVisor forward netstack for this peer
+		fn, err := c.getOrCreateFwdNetstack(fwd.PeerID, true)
+		if err != nil {
+			c.emit(EventLog, LogEvent{Level: "error", Message: "forward netstack: " + err.Error()})
+			conn.Close()
+			continue
 		}
+
+		vport := nextVirtualPort()
+		target := net.JoinHostPort(fwd.RemoteHost, strconv.Itoa(fwd.RemotePort))
+		tunnelID := fmt.Sprintf("ns:%d", vport)
+
+		// Create a channel to wait for B's confirmation
+		readyCh := make(chan struct{}, 1)
 		c.tunnelsMu.Lock()
-		c.tunnels[tunnelID] = tc
+		c.tunnels[tunnelID] = &TunnelConn{
+			TunnelID: tunnelID, PeerID: fwd.PeerID,
+			Done: readyCh, // reuse Done channel as ready signal
+		}
 		c.tunnelsMu.Unlock()
 
-		fwd.Mu.Lock()
-		fwd.ConnCount++
-		fwd.Mu.Unlock()
-
+		// Tell B to register this virtual port → real target
 		if err := c.sendRelay(fwd.PeerID, "open_tunnel", TunnelOpen{
-			TunnelID: tunnelID, TargetHost: fwd.RemoteHost, TargetPort: fwd.RemotePort,
+			TunnelID:   tunnelID,
+			TargetHost: fwd.RemoteHost,
+			TargetPort: fwd.RemotePort,
 		}); err != nil {
 			conn.Close()
 			c.tunnelsMu.Lock()
 			delete(c.tunnels, tunnelID)
 			c.tunnelsMu.Unlock()
-			fwd.Mu.Lock()
-			fwd.ConnCount--
-			fwd.Mu.Unlock()
 			continue
 		}
+
+		fwd.Mu.Lock()
+		fwd.ConnCount++
+		fwd.Mu.Unlock()
+
+		go c.bridgeForwardConn(conn, fn, vport, fwd, target, readyCh)
 	}
+}
+
+// bridgeForwardConn bridges a local TCP connection through gVisor to the peer.
+func (c *Client) bridgeForwardConn(local net.Conn, fn *forwardNetstack, vport uint16, fwd *Forward, target string, readyCh chan struct{}) {
+	defer local.Close()
+	defer func() {
+		fwd.Mu.Lock()
+		fwd.ConnCount--
+		fwd.Mu.Unlock()
+	}()
+
+	// Wait for B to confirm port registration (tunnel_opened response)
+	select {
+	case <-readyCh:
+		// B is ready
+	case <-time.After(10 * time.Second):
+		c.emit(EventLog, LogEvent{Level: "warn", Message: fmt.Sprintf(
+			"forward %s: B did not confirm port %d in time", target, vport)})
+		return
+	case <-c.done:
+		return
+	}
+
+	// Dial through gVisor to B's virtual IP:vport
+	virtual, err := fn.DialTCP(vport)
+	if err != nil {
+		c.emit(EventLog, LogEvent{Level: "warn", Message: fmt.Sprintf(
+			"forward dial %s via netstack failed: %v", target, err)})
+		return
+	}
+	defer virtual.Close()
+
+	// Bidirectional bridge — gVisor handles TCP reliability
+	errc := make(chan error, 2)
+	go func() {
+		buf := make([]byte, 64*1024)
+		n, err := io.CopyBuffer(virtual, local, buf)
+		atomic.AddInt64(&fwd.BytesUp, n)
+		errc <- err
+	}()
+	go func() {
+		buf := make([]byte, 64*1024)
+		n, err := io.CopyBuffer(local, virtual, buf)
+		atomic.AddInt64(&fwd.BytesDown, n)
+		errc <- err
+	}()
+	<-errc
 }
 
 func optimizeTCP(conn net.Conn) {
@@ -192,6 +262,30 @@ func (c *Client) handleOpenTunnel(msg Message) {
 		return
 	}
 
+	// Check if this is a netstack-based forward (TunnelID starts with "ns:")
+	if strings.HasPrefix(req.TunnelID, "ns:") {
+		vportStr := strings.TrimPrefix(req.TunnelID, "ns:")
+		vport, err := strconv.Atoi(vportStr)
+		if err != nil {
+			return
+		}
+
+		fn, err := c.getOrCreateFwdNetstack(msg.From, false)
+		if err != nil {
+			c.emit(EventLog, LogEvent{Level: "error", Message: "forward netstack B: " + err.Error()})
+			return
+		}
+
+		target := net.JoinHostPort(req.TargetHost, strconv.Itoa(req.TargetPort))
+		fn.RegisterTarget(uint16(vport), target)
+
+		c.sendRelay(msg.From, "tunnel_opened", TunnelClose{TunnelID: req.TunnelID})
+		c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf(
+			"Forward netstack: registered port %d → %s", vport, target)})
+		return
+	}
+
+	// Legacy tunnel path (non-netstack)
 	target := net.JoinHostPort(req.TargetHost, strconv.Itoa(req.TargetPort))
 	conn, err := net.DialTimeout("tcp", target, 5*time.Second)
 	if err != nil {
@@ -228,23 +322,26 @@ func (c *Client) tunnelReadLoop(tc *TunnelConn, peerID string) {
 
 	idBytes := tunnelIDToBytes(tc.TunnelID)
 
-	// Snapshot direct TCP connection (check once, use for lifetime)
-	// If it breaks mid-stream, we fall back to relay automatically.
+	// Try P2P UDP with reliable transport (RUTP)
 	c.peerConnsMu.RLock()
 	pc := c.peerConns[peerID]
+	hasP2P := pc != nil && pc.Mode == "direct" && pc.UDPAddr != nil
 	var directConn net.Conn
 	if pc != nil {
 		directConn = pc.DirectTCP
 	}
 	c.peerConnsMu.RUnlock()
 
+	if hasP2P {
+		c.tunnelReadUDP(tc, peerID, idBytes)
+		return
+	}
+
 	if directConn != nil {
-		// Fast path: direct TCP with zero-copy framing
 		c.tunnelReadDirect(tc, peerID, directConn, idBytes)
 		return
 	}
 
-	// Slow path: WebSocket relay
 	c.tunnelReadRelay(tc, peerID)
 }
 
@@ -302,6 +399,60 @@ func (c *Client) tunnelReadDirect(tc *TunnelConn, peerID string, directConn net.
 	}
 }
 
+// tunnelReadUDP: P2P UDP path with reliable transport (RUTP).
+// Uses RUTP framing (magic + seq + checksum) to ensure no data loss.
+func (c *Client) tunnelReadUDP(tc *TunnelConn, peerID string, idBytes []byte) {
+	c.peerConnsMu.RLock()
+	pc := c.peerConns[peerID]
+	c.peerConnsMu.RUnlock()
+	if pc == nil || pc.UDPAddr == nil {
+		c.tunnelReadRelay(tc, peerID)
+		return
+	}
+
+	c.connMu.Lock()
+	udp := c.udpConn
+	c.connMu.Unlock()
+	if udp == nil {
+		c.tunnelReadRelay(tc, peerID)
+		return
+	}
+
+	// Build prefix: "TF:" + tunnelID (11 bytes)
+	prefix := make([]byte, 3+8)
+	copy(prefix[:3], []byte("TF:"))
+	copy(prefix[3:], idBytes)
+
+	sender := newRutpSender(udp, pc.UDPAddr, prefix, c, peerID, tc.TunnelID)
+	tc.RutpSender = sender
+	tc.RelayDedup = &sync.Map{} // dedup relay fallback data
+	defer sender.Stop()
+
+	buf := make([]byte, 32*1024)
+	for {
+		select {
+		case <-tc.Done:
+			return
+		case <-c.done:
+			return
+		default:
+		}
+
+		tc.Conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
+		n, err := tc.Conn.Read(buf)
+		if n > 0 {
+			if tc.Forward != nil {
+				atomic.AddInt64(&tc.Forward.BytesUp, int64(n))
+			}
+			compressed := Compress(buf[:n])
+			sender.Send(compressed)
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
 // tunnelReadRelay: WebSocket relay path (always works).
 func (c *Client) tunnelReadRelay(tc *TunnelConn, peerID string) {
 	bufPtr := relayBufPool.Get().(*[]byte)
@@ -338,6 +489,23 @@ func (c *Client) handleTunnelOpened(msg Message) {
 	if err := json.Unmarshal(msg.Payload, &info); err != nil {
 		return
 	}
+
+	// For netstack-based forwards, signal the ready channel
+	if strings.HasPrefix(info.TunnelID, "ns:") {
+		c.tunnelsMu.Lock()
+		tc, ok := c.tunnels[info.TunnelID]
+		if ok {
+			select {
+			case tc.Done <- struct{}{}:
+			default:
+			}
+			delete(c.tunnels, info.TunnelID)
+		}
+		c.tunnelsMu.Unlock()
+		return
+	}
+
+	// Legacy tunnel path
 	c.tunnelsMu.RLock()
 	tc, ok := c.tunnels[info.TunnelID]
 	c.tunnelsMu.RUnlock()
@@ -393,7 +561,15 @@ func (c *Client) handleTunnelData(msg Message) {
 
 	data, err := Decompress(compressed)
 	if err != nil {
-		data = compressed // fallback: treat as raw
+		data = compressed
+	}
+
+	// Dedup: if this data was already received via UDP P2P, skip
+	if tc.RelayDedup != nil {
+		hash := simpleHash(data)
+		if _, dup := tc.RelayDedup.LoadOrStore(hash, true); dup {
+			return
+		}
 	}
 
 	if tc.Forward != nil {
@@ -567,4 +743,14 @@ func (c *Client) handleReverseForwardReject(msg Message) {
 		return
 	}
 	c.emit(EventLog, LogEvent{Level: "error", Message: fmt.Sprintf("Reverse forward rejected: %s", reject.Reason)})
+}
+
+// simpleHash computes a fast hash for deduplication.
+func simpleHash(data []byte) uint64 {
+	var h uint64 = 14695981039346656037 // FNV offset
+	for _, b := range data {
+		h ^= uint64(b)
+		h *= 1099511628211 // FNV prime
+	}
+	return h
 }

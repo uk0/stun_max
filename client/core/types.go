@@ -48,13 +48,13 @@ type PeerInfo struct {
 // PeerConn tracks per-peer connection state for hole punching.
 type PeerConn struct {
 	PeerID     string
-	Mode       string       // "connecting", "direct", "relay"
-	UDPAddr    *net.UDPAddr // peer's public UDP address
-	UDPConn    *net.UDPConn // shared UDP socket
-	DirectTCP  net.Conn     // direct TCP connection (after hole punch upgrade)
+	Mode       string           // "connecting", "direct", "relay"
+	UDPAddr    *net.UDPAddr     // peer's public UDP address
+	UDPConn    *net.UDPConn     // shared UDP socket
+	DirectTCP  net.Conn         // direct TCP connection (for port forwarding)
 	LastPunch  time.Time
-	PunchFails int          // consecutive punch failures
-	Crypto     *PeerCrypto  // encryption state
+	PunchFails int              // consecutive punch failures
+	Crypto     *PeerCrypto      // encryption state
 }
 
 // TunnelOpen is sent to request opening a tunnel to a peer's local port.
@@ -101,11 +101,14 @@ type Forward struct {
 
 // TunnelConn tracks a single tunnel connection (one TCP connection).
 type TunnelConn struct {
-	TunnelID string
-	PeerID   string // which peer this tunnel connects to
-	Conn     net.Conn
-	Forward  *Forward
-	Done     chan struct{}
+	TunnelID   string
+	PeerID     string
+	Conn       net.Conn
+	Forward    *Forward
+	RutpSender *rutpSender
+	RutpRecv   *rutpReceiver
+	RelayDedup *sync.Map // dedup relay data that was already received via UDP
+	Done       chan struct{}
 }
 
 // TunnelRejected is sent when a tunnel request is denied.
@@ -185,6 +188,7 @@ type SpeedTestResult struct {
 	DownloadMbps float64
 	Done         bool
 	Error        string
+	Transport    string // "p2p" or "relay"
 }
 
 // FileOffer is sent to propose a file transfer to a peer.
@@ -246,6 +250,7 @@ type TunSetup struct {
 	PeerIP    string   `json:"peer_ip"`
 	Subnet    string   `json:"subnet"`
 	Routes    []string `json:"routes,omitempty"` // subnets to route, e.g. ["10.88.51.0/24"]
+	ExitIP    string   `json:"exit_ip,omitempty"` // B's real LAN IP used as exit gateway
 }
 
 // TunData carries a raw IP packet through the tunnel.
@@ -256,6 +261,11 @@ type TunData struct {
 // TunTeardown signals VPN shutdown.
 type TunTeardown struct{}
 
+// TunAck is sent by B back to A with B's virtual IP after accepting VPN.
+type TunAck struct {
+	VirtualIP string `json:"virtual_ip"` // B's MAC-derived IP
+}
+
 // TunInfo is a read-only snapshot of TUN state for the GUI.
 type TunInfo struct {
 	Enabled   bool
@@ -263,6 +273,8 @@ type TunInfo struct {
 	PeerIP    string
 	Subnet    string
 	Routes    []string
+	ExitIP    string // real LAN IP used as exit gateway on B side
+	SNATIP    string // phantom SNAT IP for return routing
 	PeerID    string
 	PeerName  string
 	BytesUp   int64

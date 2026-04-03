@@ -119,6 +119,14 @@ body {
 .mode-relay { background: #ff980022; color: #ff9800; border: 1px solid #ff980044; }
 .mode-connecting { background: #66666622; color: #888; border: 1px solid #66666644; }
 
+.feature-badge {
+    display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin: 1px 2px;
+}
+.feature-vpn { background: #2196f322; color: #64b5f6; border: 1px solid #2196f344; }
+.feature-fwd { background: #9c27b022; color: #ce93d8; border: 1px solid #9c27b044; }
+.feature-route { background: #00968822; color: #4db6ac; border: 1px solid #00968844; }
+.peer-features { white-space: nowrap; }
+
 .empty-state { text-align: center; color: #444; padding: 50px 20px; font-size: 15px; }
 
 .peer-ban-btn {

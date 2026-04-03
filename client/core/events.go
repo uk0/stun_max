@@ -65,10 +65,11 @@ type ForwardEvent struct {
 
 // SpeedTestProgressEvent reports progress during a speed test.
 type SpeedTestProgressEvent struct {
-	TestID   string
-	PeerID   string
-	Phase    string  // "upload" or "download"
-	Progress float64 // 0.0 to 1.0
+	TestID    string
+	PeerID    string
+	Phase     string  // "upload" or "download"
+	Progress  float64 // 0.0 to 1.0
+	Transport string  // "p2p" or "relay"
 }
 
 // FileOfferEvent is emitted when a peer offers a file.

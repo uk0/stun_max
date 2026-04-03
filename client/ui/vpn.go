@@ -18,8 +18,9 @@ import (
 
 // VPNPanel manages the TUN VPN UI.
 type VPNPanel struct {
-	PeerEditor   widget.Editor
+	PeerSel      *PeerSelector
 	RoutesEditor widget.Editor // comma or space separated subnets
+	ExitIPEditor widget.Editor // optional exit gateway IP
 	StartBtn     widget.Clickable
 	StopBtn      widget.Clickable
 	List         widget.List
@@ -32,9 +33,23 @@ func (v *VPNPanel) init() {
 		return
 	}
 	v.inited = true
-	v.PeerEditor.SingleLine = true
+	v.PeerSel = NewPeerSelector("Select peer")
 	v.RoutesEditor.SingleLine = true
+	v.ExitIPEditor.SingleLine = true
 	v.List.Axis = layout.Vertical
+
+	// Restore VPN settings from config
+	if cfg := LoadConfig(); cfg != nil {
+		if cfg.VPNPeer != "" {
+			v.PeerSel.Selected = cfg.VPNPeer
+		}
+		if len(cfg.VPNRoutes) > 0 {
+			v.RoutesEditor.SetText(strings.Join(cfg.VPNRoutes, ", "))
+		}
+		if cfg.VPNExitIP != "" {
+			v.ExitIPEditor.SetText(cfg.VPNExitIP)
+		}
+	}
 }
 
 // Layout renders the VPN panel.
@@ -48,13 +63,13 @@ func (v *VPNPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layout
 
 	// Handle start button
 	if v.StartBtn.Clicked(gtx) && a.Client != nil {
-		peer := strings.TrimSpace(v.PeerEditor.Text())
+		peer := strings.TrimSpace(v.PeerSel.Text())
 		routesStr := strings.TrimSpace(v.RoutesEditor.Text())
+		exitIP := strings.TrimSpace(v.ExitIPEditor.Text())
 		if peer == "" {
-			v.Error = "Enter a peer ID or name"
+			v.Error = "Select a peer"
 		} else {
 			v.Error = ""
-			// Parse routes: comma or space separated
 			var routes []string
 			if routesStr != "" {
 				for _, r := range strings.FieldsFunc(routesStr, func(c rune) bool {
@@ -67,9 +82,19 @@ func (v *VPNPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layout
 				}
 			}
 			go func() {
-				if err := a.Client.StartTun(peer, routes); err != nil {
+				if err := a.Client.StartTun(peer, routes, exitIP); err != nil {
 					v.Error = err.Error()
 					a.Window.Invalidate()
+				} else {
+					// Save VPN config
+					if cfg := LoadConfig(); cfg != nil {
+						cfg.VirtualIP = core.GetVirtualIP()
+						cfg.VPNPeer = peer
+						cfg.VPNRoutes = routes
+						cfg.VPNExitIP = exitIP
+						cfg.VPNAutoStart = true
+						SaveConfig(cfg)
+					}
 				}
 			}()
 		}
@@ -81,6 +106,11 @@ func (v *VPNPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layout
 			if err := a.Client.StopTun(); err != nil {
 				v.Error = err.Error()
 				a.Window.Invalidate()
+			} else {
+				if cfg := LoadConfig(); cfg != nil {
+					cfg.VPNAutoStart = false
+					SaveConfig(cfg)
+				}
 			}
 		}()
 	}
@@ -89,7 +119,7 @@ func (v *VPNPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layout
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			// Control card
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return v.layoutControlCard(gtx, th, tunInfo)
+				return v.layoutControlCard(gtx, th, a, tunInfo)
 			}),
 			// Status card
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -103,7 +133,7 @@ func (v *VPNPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layout
 	})
 }
 
-func (v *VPNPanel) layoutControlCard(gtx layout.Context, th *material.Theme, info core.TunInfo) layout.Dimensions {
+func (v *VPNPanel) layoutControlCard(gtx layout.Context, th *material.Theme, a *App, info core.TunInfo) layout.Dimensions {
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
@@ -121,28 +151,32 @@ func (v *VPNPanel) layoutControlCard(gtx layout.Context, th *material.Theme, inf
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-								layout.Flexed(0.35, func(gtx layout.Context) layout.Dimensions {
-									return layoutInputField(gtx, th, &v.PeerEditor, "Peer ID or name")
+								layout.Flexed(0.22, func(gtx layout.Context) layout.Dimensions {
+									return v.PeerSel.Layout(gtx, th, a)
 								}),
-								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-								layout.Flexed(0.45, func(gtx layout.Context) layout.Dimensions {
+								layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+								layout.Flexed(0.30, func(gtx layout.Context) layout.Dimensions {
 									return layoutInputField(gtx, th, &v.RoutesEditor, "Subnets (e.g. 10.88.51.0/24)")
 								}),
-								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+								layout.Flexed(0.20, func(gtx layout.Context) layout.Dimensions {
+									return layoutInputField(gtx, th, &v.ExitIPEditor, "Exit IP (auto)")
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 									if info.Enabled {
 										btn := material.Button(th, &v.StopBtn, "Stop VPN")
 										btn.Background = ErrorColor
 										btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 										btn.CornerRadius = unit.Dp(4)
-										btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(20), Right: unit.Dp(20)}
+										btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
 										return btn.Layout(gtx)
 									}
 									btn := material.Button(th, &v.StartBtn, "Start VPN")
 									btn.Background = SuccessColor
 									btn.Color = color.NRGBA{A: 255}
 									btn.CornerRadius = unit.Dp(4)
-									btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(20), Right: unit.Dp(20)}
+									btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
 									return btn.Layout(gtx)
 								}),
 							)
@@ -204,13 +238,20 @@ func (v *VPNPanel) layoutStatusCard(gtx layout.Context, th *material.Theme, info
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 							return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 								return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-									layout.Flexed(0.33, func(gtx layout.Context) layout.Dimensions {
+									layout.Flexed(0.25, func(gtx layout.Context) layout.Dimensions {
 										return vpnStatItem(gtx, th, "Local IP", info.VirtualIP)
 									}),
-									layout.Flexed(0.33, func(gtx layout.Context) layout.Dimensions {
+									layout.Flexed(0.25, func(gtx layout.Context) layout.Dimensions {
 										return vpnStatItem(gtx, th, "Peer IP", info.PeerIP)
 									}),
-									layout.Flexed(0.34, func(gtx layout.Context) layout.Dimensions {
+									layout.Flexed(0.25, func(gtx layout.Context) layout.Dimensions {
+										exitStr := info.ExitIP
+										if exitStr == "" {
+											exitStr = "-"
+										}
+										return vpnStatItem(gtx, th, "Exit IP", exitStr)
+									}),
+									layout.Flexed(0.25, func(gtx layout.Context) layout.Dimensions {
 										return vpnStatItem(gtx, th, "Subnet", info.Subnet)
 									}),
 								)

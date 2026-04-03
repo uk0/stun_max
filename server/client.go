@@ -9,10 +9,10 @@ import (
 )
 
 const (
-	writeWait      = 10 * time.Second
-	pongWait       = 60 * time.Second
+	writeWait      = 30 * time.Second
+	pongWait       = 120 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
-	maxMessageSize = 256 * 1024 // 256KB for tunnel data
+	maxMessageSize = 512 * 1024 // 512KB for tunnel data
 )
 
 // Client represents a connected WebSocket peer
@@ -21,12 +21,13 @@ type Client struct {
 	conn     *websocket.Conn
 	send     chan []byte
 	id       string
-	room     string   // display room name
-	roomKey  string   // internal key: "name" or "name:hash"
-	status   string   // "connecting", "direct", "relay"
-	name     string   // friendly name from CLI
-	services []string // advertised host:port list
-	endpoint string   // STUN-discovered public UDP endpoint
+	room     string            // display room name
+	roomKey  string            // internal key: "name" or "name:hash"
+	status   string            // "connecting", "direct", "relay"
+	name     string            // friendly name from CLI
+	services []string          // advertised host:port list
+	endpoint string            // STUN-discovered public UDP endpoint
+	features map[string]string // active features reported by client
 }
 
 func (c *Client) readPump() {
@@ -41,15 +42,22 @@ func (c *Client) readPump() {
 		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
+	// Also reset deadline on client pings (client sends pings every 30s)
+	c.conn.SetPingHandler(func(msg string) error {
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		c.conn.WriteControl(websocket.PongMessage, []byte(msg), time.Now().Add(10*time.Second))
+		return nil
+	})
 
 	for {
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Client %s read error: %v", c.id, err)
-			}
+			log.Printf("Client %s disconnected: %v", c.id, err)
 			break
 		}
+
+		// Reset deadline on ANY received message — not just pong
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 
 		var msg Message
 		if err := json.Unmarshal(data, &msg); err != nil {
@@ -80,11 +88,12 @@ func (c *Client) writePump() {
 
 			w, err := c.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
+				log.Printf("Client %s write error (NextWriter): %v", c.id, err)
 				return
 			}
 			w.Write(msg)
 
-			// Drain any queued messages into the same write
+			// Drain queued messages into the same write (batch)
 			n := len(c.send)
 			for i := 0; i < n; i++ {
 				w.Write([]byte("\n"))
@@ -92,12 +101,14 @@ func (c *Client) writePump() {
 			}
 
 			if err := w.Close(); err != nil {
+				log.Printf("Client %s write error (Close): %v", c.id, err)
 				return
 			}
 
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Printf("Client %s ping write error: %v", c.id, err)
 				return
 			}
 		}
@@ -137,6 +148,9 @@ func (c *Client) handleMessage(msg Message) {
 
 	case "status_update":
 		c.handleStatusUpdate(msg)
+
+	case "feature_update":
+		c.handleFeatureUpdate(msg)
 
 	case "relay_data":
 		c.handleRelayData(msg)
@@ -291,6 +305,14 @@ func (c *Client) handleStatusUpdate(msg Message) {
 	if ok {
 		room.broadcastPeerList()
 	}
+}
+
+func (c *Client) handleFeatureUpdate(msg Message) {
+	var features map[string]string
+	if err := json.Unmarshal(msg.Payload, &features); err != nil {
+		return
+	}
+	c.features = features
 }
 
 func (c *Client) handleRelayData(msg Message) {

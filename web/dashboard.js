@@ -212,7 +212,7 @@ class Dashboard {
                 </div>
                 ${room.peers.length > 0 ? `
                 <table class="peer-table">
-                    <thead><tr><th>ID</th><th>Name</th><th>Connection</th><th>Endpoint</th><th></th></tr></thead>
+                    <thead><tr><th>ID</th><th>Name</th><th>Connection</th><th>Features</th><th>Endpoint</th><th></th></tr></thead>
                     <tbody>
                         ${room.peers.map(p => `
                             <tr>
@@ -221,6 +221,7 @@ class Dashboard {
                                 <td><span class="mode-badge mode-${p.status}">
                                     ${p.status === 'direct' ? '⚡ P2P' : p.status === 'relay' ? '🔄 RELAY' : '⏳ ...'}
                                 </span></td>
+                                <td class="peer-features">${this.renderFeatures(p.features)}</td>
                                 <td class="peer-endpoint">${this.esc(p.endpoint || '-')}</td>
                                 <td><button class="peer-ban-btn" onclick="app.banClient('${this.esc(room.name)}','${this.esc(p.id)}')">Ban</button></td>
                             </tr>
@@ -255,6 +256,15 @@ class Dashboard {
         const d = document.createElement('div');
         d.textContent = str;
         return d.innerHTML;
+    }
+
+    renderFeatures(features) {
+        if (!features || Object.keys(features).length === 0) return '<span style="color:#666">-</span>';
+        const badges = [];
+        if (features.vpn) badges.push(`<span class="feature-badge feature-vpn" title="VPN with ${this.esc(features.vpn)}">🔒 VPN</span>`);
+        if (features.forwards) badges.push(`<span class="feature-badge feature-fwd" title="${features.forwards} active forwards">🔀 ${this.esc(features.forwards)} fwd</span>`);
+        if (features.vpn_routes) badges.push(`<span class="feature-badge feature-route" title="Routes: ${this.esc(features.vpn_routes)}">🌐 routes</span>`);
+        return badges.join(' ') || '<span style="color:#666">-</span>';
     }
 }
 

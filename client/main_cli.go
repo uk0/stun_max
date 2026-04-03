@@ -618,15 +618,29 @@ func cmdStun() {
 
 func cmdSpeedTest(args []string) {
 	if len(args) < 1 {
-		fmt.Printf("%sUsage: speedtest <peer>%s\n", cRed, cReset)
+		fmt.Printf("%sUsage: speedtest <peer> [size_mb]%s\n", cRed, cReset)
+		fmt.Printf("%sExample: speedtest win10 10%s\n", cGray, cReset)
 		return
 	}
-	testID, err := client.StartSpeedTest(args[0])
+	sizeMB := 10
+	if len(args) >= 2 {
+		if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
+			sizeMB = n
+		}
+	}
+	mode := "auto"
+	if len(args) >= 3 {
+		switch args[2] {
+		case "p2p", "relay":
+			mode = args[2]
+		}
+	}
+	testID, err := client.StartSpeedTest(args[0], sizeMB, mode)
 	if err != nil {
 		fmt.Printf("%s%v%s\n", cRed, err, cReset)
 		return
 	}
-	fmt.Printf("%sSpeed test started: %s%s\n", cCyan, testID[:8], cReset)
+	fmt.Printf("%sSpeed test started (%d MB): %s%s\n", cCyan, sizeMB, testID[:8], cReset)
 }
 
 func cmdHop(args []string) {
@@ -668,8 +682,9 @@ func cmdHop(args []string) {
 
 func cmdVPN(args []string) {
 	if len(args) == 0 {
-		fmt.Printf("%sUsage: vpn <peer> [subnet1 subnet2 ...] | vpn stop | vpn status%s\n", cRed, cReset)
-		fmt.Printf("%sExample: vpn win10 10.88.51.0/24 192.168.1.0/24%s\n", cGray, cReset)
+		fmt.Printf("%sUsage: vpn <peer> [subnet1 ...] [--exit-ip IP] | vpn stop | vpn status%s\n", cRed, cReset)
+		fmt.Printf("%sExample: vpn win10 10.88.51.0/24%s\n", cGray, cReset)
+		fmt.Printf("%s         vpn win10 10.88.51.0/24 --exit-ip 10.88.51.27%s\n", cGray, cReset)
 		return
 	}
 
@@ -689,6 +704,12 @@ func cmdVPN(args []string) {
 		fmt.Printf("  Local IP:  %s%s%s\n", cGreen, info.VirtualIP, cReset)
 		fmt.Printf("  Peer IP:   %s%s%s\n", cGreen, info.PeerIP, cReset)
 		fmt.Printf("  Subnet:    %s\n", info.Subnet)
+		if info.ExitIP != "" {
+			fmt.Printf("  Exit IP:   %s%s%s\n", cGreen, info.ExitIP, cReset)
+		}
+		if info.SNATIP != "" {
+			fmt.Printf("  SNAT IP:   %s\n", info.SNATIP)
+		}
 		fmt.Printf("  Peer:      %s (%s)\n", info.PeerName, shortID(info.PeerID))
 		if len(info.Routes) > 0 {
 			fmt.Printf("  Routes:    %s\n", strings.Join(info.Routes, ", "))
@@ -699,12 +720,18 @@ func cmdVPN(args []string) {
 		}
 		fmt.Println()
 	default:
-		// args[0] = peer, args[1:] = subnets to route
+		// args[0] = peer, rest = subnets or --exit-ip
 		var routes []string
-		if len(args) > 1 {
-			routes = args[1:]
+		var exitIP string
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--exit-ip" && i+1 < len(args) {
+				exitIP = args[i+1]
+				i++
+			} else {
+				routes = append(routes, args[i])
+			}
 		}
-		if err := client.StartTun(subcmd, routes); err != nil {
+		if err := client.StartTun(subcmd, routes, exitIP); err != nil {
 			fmt.Printf("%s%v%s\n", cRed, err, cReset)
 		}
 	}
@@ -723,8 +750,9 @@ func printHelp() {
 	fmt.Println("  speedtest <peer>                           Run speed test")
 	fmt.Println("  send <peer> <filepath>                     Send file to peer")
 	fmt.Println("  transfers                                  List active file transfers")
-	fmt.Println("  vpn <peer> [subnets...]                    Start VPN, route subnets through peer")
+	fmt.Println("  vpn <peer> [subnets...] [--exit-ip IP]    Start VPN, route subnets through peer")
 	fmt.Println("    example: vpn win10 10.88.51.0/24")
+	fmt.Println("    example: vpn win10 10.88.51.0/24 --exit-ip 10.88.51.27")
 	fmt.Println("  vpn stop                                   Stop active VPN")
 	fmt.Println("  vpn status                                 Show VPN status")
 	fmt.Println("  help                                       Show this help")

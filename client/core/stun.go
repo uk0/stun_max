@@ -434,6 +434,7 @@ func (c *Client) onHolePunchSuccess(peerID string, addr *net.UDPAddr) {
 			pc.Crypto = crypto
 		}
 	}
+
 	c.peerConnsMu.Unlock()
 
 	if wasRelay {
@@ -442,10 +443,6 @@ func (c *Client) onHolePunchSuccess(peerID string, addr *net.UDPAddr) {
 	c.emit(EventHolePunchSuccess, PeerEvent{ID: peerID, Status: "direct"})
 	c.sendStatusUpdate("direct")
 	c.sendKeyExchange(peerID)
-
-	// Attempt direct TCP connection to peer for reliable tunnel data.
-	// This runs in background — if it fails, relay is used automatically.
-	go c.attemptDirectTCP(peerID, addr)
 }
 
 // sendKeyExchange sends our X25519 public key to a peer over UDP.
@@ -590,6 +587,148 @@ func (c *Client) udpReadLoop() {
 			continue
 		}
 
+		// Forward netstack data over UDP: "FN:" + compressed IP packet
+		if n > 3 && string(data[:3]) == "FN:" {
+			compressed := data[3:]
+			raw, err := Decompress(compressed)
+			if err != nil {
+				continue
+			}
+			c.handleFwdNetstackPacket(raw, addr)
+			continue
+		}
+
+		// VPN data over UDP: "VPN:" + compressed IP packet
+		if n > 4 && string(data[:4]) == "VPN:" {
+			compressed := data[4:]
+			raw, err := Decompress(compressed)
+			if err != nil {
+				continue
+			}
+			c.handleTunDataDirect(raw, nil)
+			continue
+		}
+
+		// SpeedTest data over UDP: "ST:" + compressed JSON
+		if n > 3 && string(data[:3]) == "ST:" {
+			compressed := data[3:]
+			payload, err := Decompress(compressed)
+			if err != nil {
+				continue
+			}
+			var stData SpeedTestData
+			if err := json.Unmarshal(payload, &stData); err == nil {
+				c.processSpeedTestData(stData)
+			}
+			continue
+		}
+
+		// P2P signal message: "SM:<type>:<json>"
+		if n > 3 && string(data[:3]) == "SM:" {
+			rest := data[3:]
+			// Find the colon separating type from payload
+			colonIdx := -1
+			for i, b := range rest {
+				if b == ':' {
+					colonIdx = i
+					break
+				}
+			}
+			if colonIdx > 0 && colonIdx < len(rest)-1 {
+				msgType := string(rest[:colonIdx])
+				payload := rest[colonIdx+1:]
+				peerID := c.findPeerByUDPAddr(addr)
+				if peerID != "" {
+					inner := Message{
+						Type:    msgType,
+						From:    peerID,
+						Payload: json.RawMessage(payload),
+					}
+					switch msgType {
+					case "st_begin":
+						c.handleSTBegin(inner)
+					case "st_ready":
+						c.handleSTReady(inner)
+					case "st_finish":
+						c.handleSTFinish(inner)
+					case "st_result":
+						c.handleSTResult(inner)
+					}
+				}
+			}
+			continue
+		}
+
+		// Tunnel forward data over UDP with RUTP: "TF:" + [8B tunnelID] + [RUTP frame]
+		if n > 11 && string(data[:3]) == "TF:" {
+			tunnelID := tunnelIDFromBytes(data[3:11])
+			rutpFrame := data[11:]
+
+			typ, seq, payload, ok := rutpParseFrame(rutpFrame)
+			if !ok {
+				continue
+			}
+
+			if typ == rutpACK {
+				// ACK for data we sent — find sender and notify
+				// Senders track their own ACKs via the pending map
+				// We need to find the right sender... store per-tunnel
+				c.tunnelsMu.RLock()
+				tc, exists := c.tunnels[tunnelID]
+				c.tunnelsMu.RUnlock()
+				if exists && tc.RutpSender != nil {
+					tc.RutpSender.OnACK(seq)
+				}
+				continue
+			}
+
+			if typ == rutpDATA {
+				c.tunnelsMu.RLock()
+				tc, exists := c.tunnels[tunnelID]
+				c.tunnelsMu.RUnlock()
+				if !exists {
+					continue
+				}
+
+				// Initialize receiver if needed
+				if tc.RutpRecv == nil {
+					c.connMu.Lock()
+					udp := c.udpConn
+					c.connMu.Unlock()
+					if udp != nil {
+						prefix := make([]byte, 11)
+						copy(prefix[:3], []byte("TF:"))
+						copy(prefix[3:], data[3:11])
+						tc.RutpRecv = newRutpReceiver(udp, addr, prefix)
+						if tc.RelayDedup == nil {
+							tc.RelayDedup = &sync.Map{}
+						}
+					}
+				}
+
+				if tc.RutpRecv != nil {
+					deduped := tc.RutpRecv.OnData(seq, payload)
+					if deduped != nil {
+						raw, derr := Decompress(deduped)
+						if derr != nil {
+							raw = deduped
+						}
+						// Mark in RelayDedup so relay fallback won't duplicate
+						if tc.RelayDedup != nil {
+							tc.RelayDedup.Store(simpleHash(raw), true)
+						}
+						if tc.Forward != nil {
+							atomic.AddInt64(&tc.Forward.BytesDown, int64(len(raw)))
+						}
+						tc.Conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+						tc.Conn.Write(raw)
+					}
+				}
+				continue
+			}
+			continue
+		}
+
 		// Tunnel data over UDP: [0x00][8-byte tunnel_id][plaintext payload]
 		if n > 9 && data[0] == 0x00 {
 			tunnelID := tunnelIDFromBytes(data[1:9])
@@ -664,40 +803,18 @@ func (c *Client) handleEncryptedUDPData(tunnelID string, encrypted []byte, addr 
 	c.handleUDPTunnelData(tunnelID, encrypted)
 }
 
-// attemptDirectTCP tries to establish a direct TCP connection to the peer.
-// On LAN this connects instantly. On WAN it may fail (NAT blocks TCP).
-// If successful, tunnel data uses this TCP connection instead of WS relay.
-func (c *Client) attemptDirectTCP(peerID string, addr *net.UDPAddr) {
-	// Try connecting to the peer's TCP listener (same IP, port+1)
-	tcpAddr := net.JoinHostPort(addr.IP.String(), fmt.Sprintf("%d", addr.Port+1))
-
-	conn, err := net.DialTimeout("tcp", tcpAddr, 3*time.Second)
-	if err != nil {
-		if c.verbose {
-			c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("Direct TCP to %s failed (using relay): %v", shortID(peerID), err)})
+// startDirectTCPListener listens for incoming direct TCP connections from peers.
+func (c *Client) findPeerByUDPAddr(addr *net.UDPAddr) string {
+	c.peerConnsMu.RLock()
+	defer c.peerConnsMu.RUnlock()
+	for id, pc := range c.peerConns {
+		if pc.UDPAddr != nil && pc.UDPAddr.IP.Equal(addr.IP) && pc.UDPAddr.Port == addr.Port {
+			return id
 		}
-		return
 	}
-
-	// Send our ID so the peer knows who connected
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	conn.Write([]byte("STUNMAX:" + c.MyID + "\n"))
-
-	c.peerConnsMu.Lock()
-	pc := c.peerConns[peerID]
-	if pc != nil {
-		pc.DirectTCP = conn
-	}
-	c.peerConnsMu.Unlock()
-
-	c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("Direct TCP established with %s", shortID(peerID))})
-
-	// Start reading from this direct TCP connection
-	c.wg.Add(1)
-	go c.directTCPReadLoop(conn)
+	return ""
 }
 
-// startDirectTCPListener listens for incoming direct TCP connections from peers.
 func (c *Client) startDirectTCPListener() {
 	c.connMu.Lock()
 	udp := c.udpConn
@@ -859,7 +976,7 @@ func (c *Client) directTCPReadLoop(conn net.Conn) {
 
 		tunnelID := tunnelIDFromBytes(header[:8])
 		dataLen := int(header[8])<<24 | int(header[9])<<16 | int(header[10])<<8 | int(header[11])
-		if dataLen <= 0 || dataLen > 256*1024 {
+		if dataLen <= 0 || dataLen > 512*1024 {
 			return
 		}
 
