@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/binary"
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -20,27 +19,29 @@ const (
 
 var softwareValue = []byte("stun-max")
 
-func main() {
-	addr := flag.String("addr", ":3478", "STUN listen address (UDP)")
-	flag.Parse()
-
-	pc, err := net.ListenPacket("udp", *addr)
+// startSTUNServer listens on UDP addr and serves STUN binding responses in a background goroutine.
+func startSTUNServer(addr string) error {
+	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
-		log.Fatalf("Listen failed: %v", err)
+		return err
 	}
-	defer pc.Close()
 
 	fmt.Println("═══════════════════════════════════════")
 	fmt.Println("  STUN Max - STUN Server")
 	fmt.Println("═══════════════════════════════════════")
-	fmt.Printf("  Listening on UDP %s\n", *addr)
+	fmt.Printf("  Listening on UDP %s\n", pc.LocalAddr())
 	fmt.Println("═══════════════════════════════════════")
 
+	go stunServeLoop(pc)
+	return nil
+}
+
+func stunServeLoop(pc net.PacketConn) {
 	buf := make([]byte, 1500)
 	for {
 		n, raddr, err := pc.ReadFrom(buf)
 		if err != nil {
-			log.Printf("Read error: %v", err)
+			log.Printf("STUN read error: %v", err)
 			continue
 		}
 		if n < headerSize {
@@ -57,9 +58,12 @@ func main() {
 
 		udpAddr := raddr.(*net.UDPAddr)
 		resp := buildBindingResponse(txID, udpAddr)
+		if resp == nil {
+			continue
+		}
 
 		if _, err := pc.WriteTo(resp, raddr); err != nil {
-			log.Printf("Write error to %s: %v", raddr, err)
+			log.Printf("STUN write error to %s: %v", raddr, err)
 		}
 	}
 }
@@ -70,17 +74,15 @@ func buildBindingResponse(txID []byte, addr *net.UDPAddr) []byte {
 		return nil
 	}
 
-	// XOR-MAPPED-ADDRESS attribute (8 bytes value)
-	xorMapped := make([]byte, 12) // 4 header + 8 value
+	xorMapped := make([]byte, 12)
 	binary.BigEndian.PutUint16(xorMapped[0:2], attrXorMapped)
 	binary.BigEndian.PutUint16(xorMapped[2:4], 8)
-	xorMapped[4] = 0x00 // reserved
-	xorMapped[5] = 0x01 // IPv4
+	xorMapped[4] = 0x00
+	xorMapped[5] = 0x01
 	binary.BigEndian.PutUint16(xorMapped[6:8], uint16(addr.Port)^uint16(magicCookie>>16))
 	ipInt := binary.BigEndian.Uint32(ip4)
 	binary.BigEndian.PutUint32(xorMapped[8:12], ipInt^magicCookie)
 
-	// MAPPED-ADDRESS attribute (for older clients)
 	mapped := make([]byte, 12)
 	binary.BigEndian.PutUint16(mapped[0:2], attrMapped)
 	binary.BigEndian.PutUint16(mapped[2:4], 8)
@@ -89,7 +91,6 @@ func buildBindingResponse(txID []byte, addr *net.UDPAddr) []byte {
 	binary.BigEndian.PutUint16(mapped[6:8], uint16(addr.Port))
 	binary.BigEndian.PutUint32(mapped[8:12], ipInt)
 
-	// SOFTWARE attribute
 	swPad := len(softwareValue)
 	if swPad%4 != 0 {
 		swPad += 4 - (swPad % 4)
@@ -99,10 +100,8 @@ func buildBindingResponse(txID []byte, addr *net.UDPAddr) []byte {
 	binary.BigEndian.PutUint16(software[2:4], uint16(len(softwareValue)))
 	copy(software[4:], softwareValue)
 
-	// Total attributes length
 	attrsLen := len(xorMapped) + len(mapped) + len(software)
 
-	// Build response
 	resp := make([]byte, headerSize+attrsLen)
 	binary.BigEndian.PutUint16(resp[0:2], bindingSuccess)
 	binary.BigEndian.PutUint16(resp[2:4], uint16(attrsLen))

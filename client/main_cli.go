@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"stun_max/client/core"
+	"stun_max/internal/natcheck"
 
 	"github.com/chzyer/readline"
 )
@@ -37,6 +38,12 @@ func notify(color, format string, args ...interface{}) {
 }
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "natcheck" {
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+		natcheck.Run()
+		return
+	}
+
 	serverURL := flag.String("server", "ws://localhost:8080/ws", "WebSocket server URL")
 	room := flag.String("room", "", "Room name to join")
 	password := flag.String("password", "", "Room password")
@@ -44,10 +51,20 @@ func main() {
 	stunServer := flag.String("stun", "stun.cloudflare.com:3478", "STUN servers (comma-separated)")
 	noStun := flag.Bool("no-stun", false, "Disable STUN (relay-only)")
 	verbose := flag.Bool("v", false, "Verbose logging")
+	flag.Usage = func() {
+		prog := os.Args[0]
+		fmt.Fprintf(os.Stderr, "Usage:\n")
+		fmt.Fprintf(os.Stderr, "  %s --server <url> --room <room> [--password] [--name] [flags]   Connect to signal server\n", prog)
+		fmt.Fprintf(os.Stderr, "  %s natcheck [-servers <list>] [-v]                             NAT type diagnostic (standalone)\n\n", prog)
+		fmt.Fprintf(os.Stderr, "Flags for connect mode:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nRun \"%s natcheck -h\" for natcheck-specific flags.\n", prog)
+	}
 	flag.Parse()
 
 	if *room == "" {
 		fmt.Fprintf(os.Stderr, "Usage: stun_max-cli --server ws://host/ws --room <room> --password <pass> --name <name>\n")
+		fmt.Fprintf(os.Stderr, "       stun_max-cli natcheck [-servers …] [-v]   NAT type diagnostic (no server connection)\n")
 		os.Exit(1)
 	}
 	if *name == "" {

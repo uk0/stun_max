@@ -20,7 +20,7 @@
 - **Auto Reconnect** — Network changes trigger automatic reconnect (3s interval, infinite retry)
 - **Room-Based Access** — Password-protected rooms, created via admin dashboard only
 - **GUI + CLI** — Gio UI desktop app (Windows/Mac) + readline CLI with tab completion
-- **NAT Diagnostic** — Built-in `natcheck` tool detects NAT type and punch success probability
+- **NAT Diagnostic** — Same server binary: `stun_max-server natcheck` detects NAT type and punch success probability
 - **Windows Tools** — One-click RDP enable (localhost-only firewall), auto-login, admin autostart
 - **Config Persistence** — Connection, forwards, STUN servers saved and restored across restarts
 - **Blacklist** — Ban clients per room from the admin dashboard
@@ -67,27 +67,23 @@
 ### 1. Deploy Server
 
 ```bash
-./build.sh
+make
 
 # Upload to your server
 scp build/stun_max-server-linux-amd64 root@SERVER:/usr/local/bin/stun_max-server
-scp build/stun_max-stunserver-linux-amd64 root@SERVER:/usr/local/bin/stun_max-stunserver
-ssh root@SERVER "mkdir -p /opt/stun_max/web"
-scp -r build/web/* root@SERVER:/opt/stun_max/web/
 ```
 
-Create systemd services:
+Create a systemd unit (HTTP dashboard + optional embedded STUN on UDP 3478 in one process):
 
 ```bash
-# Signal Server
 cat > /etc/systemd/system/stun-max.service << 'EOF'
 [Unit]
-Description=STUN Max Signal Server
+Description=STUN Max Signal Server (+ optional STUN)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/stun_max-server --addr :8080 --web-dir /opt/stun_max/web
+ExecStart=/usr/local/bin/stun_max-server --addr :8080 --stun-addr :3478
 Restart=always
 RestartSec=3
 LimitNOFILE=65536
@@ -96,24 +92,11 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF
 
-# STUN Server (optional, recommended for China)
-cat > /etc/systemd/system/stun-max-stun.service << 'EOF'
-[Unit]
-Description=STUN Max STUN Server
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/stun_max-stunserver --addr :3478
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
 systemctl daemon-reload
-systemctl enable --now stun-max stun-max-stun
+systemctl enable --now stun-max
 ```
+
+Omit `--stun-addr :3478` if you only need the WebSocket dashboard and use public STUN servers from clients.
 
 Get the auto-generated dashboard password:
 
@@ -139,6 +122,9 @@ Run `stun_max-client-windows-amd64.exe` or `stun_max-client-darwin-arm64`, fill 
 
 ```bash
 ./stun_max-cli --server ws://SERVER:8080/ws --room myroom --password secret --name laptop
+
+# NAT diagnostic (no signaling server; same as stun_max-server natcheck)
+./stun_max-cli natcheck -v
 ```
 
 ### 4. Forward Ports
@@ -156,13 +142,21 @@ Run `stun_max-client-windows-amd64.exe` or `stun_max-client-darwin-arm64`, fill 
 ## Build
 
 ```bash
-./build.sh                                    # all platforms
-go build ./server/                            # server only
+make                                          # all platforms; make help 查看目标
+go build ./server/                            # HTTP server; add -stun-addr for embedded STUN; subcommand natcheck
 go build ./client/                            # GUI client
 go build -tags cli ./client/                  # CLI client
-go build ./tools/natcheck/                    # NAT diagnostic
-go build ./tools/stunserver/                  # STUN server
 ```
+
+Server CLI:
+
+- `stun_max-server [flags]` — signal server + dashboard (`-stun-addr :3478` enables STUN in the same binary).
+- `stun_max-server natcheck [-servers …] [-v]` — NAT diagnostic (standalone; exits when done).
+- `stun_max-server help` — usage for the HTTP mode.
+
+CLI client (`go build -tags cli ./client/`):
+
+- `stun_max-cli natcheck [-servers …] [-v]` — same NAT diagnostic as above (no `--server` / room).
 
 ## CLI Commands
 
@@ -210,10 +204,11 @@ Tab completion for commands, peer names, and ports.
 |------|---------|-------------|
 | `--addr` | `:8080` | Listen address |
 | `--web-password` | (random) | Dashboard password |
-| `--web-dir` | `../web` | Static files path |
 | `--max-connections` | `5000` | Max WebSocket connections |
 
 ## Client Flags (CLI)
+
+Run `stun_max-cli natcheck -h` for NAT diagnostic flags (`-servers`, `-v`). Normal session flags apply only when connecting to a room (not used with the `natcheck` subcommand).
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -256,9 +251,11 @@ client/ui/           Gio UI desktop app
   config.go          Config persistence
   autostart_*.go     Windows Task Scheduler / registry
 
-web/                 Admin dashboard (HTML/JS/CSS)
-tools/natcheck/      NAT type diagnostic
-tools/stunserver/    Self-hosted STUN server
+server/web/          Admin dashboard (HTML/JS/CSS, go:embed)
+server/stun.go       Embedded STUN server (-stun-addr)
+server/natcheck.go   Delegates to internal/natcheck (server subcommand)
+
+internal/natcheck/   NAT diagnostic (shared: `stun_max-server natcheck`, `stun_max-cli natcheck`)
 ```
 
 ## License
