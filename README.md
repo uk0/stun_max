@@ -2,6 +2,13 @@
   <img src="img/logo.png" width="128" alt="STUN Max Logo">
 </p>
 
+
+> 微信公众号：STUN Max<br>
+
+<p align="center">
+  <img src="img/weixin.png" width="256" alt="WeChat QR Code">
+</p>
+
 <h1 align="center">STUN Max</h1>
 
 <p align="center">

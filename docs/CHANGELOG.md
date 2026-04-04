@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## 2026-04-04 - Multi-VPN + Route Append + UI Improvements
+
+### Multi-VPN Support
+- **Multiple simultaneous VPN connections** — connect to different peers at the same time, each with independent TUN device, virtual IP (10.7.{N}.X), and routes
+- **Per-peer data structure** — `tunDevices map[peerID]*TunDevice` replaces single pointer, per-peer ack channels and transport mode tracking
+- **Route append** — adding a new subnet to an existing peer VPN appends the route instead of rejecting, B side notified automatically
+- **Per-peer stop** — `StopTunPeer(peerID)` stops specific VPN, `StopTun()` stops all
+
+### GUI VPN Panel
+- **VPN list** — each active VPN shown as card with role badge, peer name, stats, and stop button
+- **Role badge** — blue `OUT` (initiator/主动) or gray `IN` (responder/被动) per VPN entry
+- **Stop button alignment** — pushed to right edge with flexed spacer
+- **Stop All button** — appears when any VPN is active
+- **Start always visible** — can add new VPN connections without stopping existing ones
+- **5-column stats** — Local IP, Peer IP, Routes, Traffic (total), Speed (real-time ↑/s ↓/s)
+
+### CLI VPN Commands
+- `vpn <peer> <subnet1> [subnet2...]` — start VPN with multiple subnets
+- `vpn <peer> <new-subnet>` — append route to existing VPN
+- `vpn stop <peer>` — stop specific peer's VPN
+- `vpn stop` — stop all VPNs
+- `vpn status` — show all active VPNs with numbered list
+
+### Internal
+- Virtual IP allocation: `10.7.{N}.X` where N = VPN index, X = MAC-derived
+- UDP packet routing by peer address for multi-device support
+- `TunStatusAll() []TunInfo` API for GUI/CLI
+
 ## 2026-04-03 - gVisor Netstack + SpeedTest P2P + TUN VPN Improvements
 
 ### Architecture: gVisor Userspace TCP/IP Stack

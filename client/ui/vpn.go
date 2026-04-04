@@ -19,10 +19,11 @@ import (
 // VPNPanel manages the TUN VPN UI.
 type VPNPanel struct {
 	PeerSel      *PeerSelector
-	RoutesEditor widget.Editor // comma or space separated subnets
-	ExitIPEditor widget.Editor // optional exit gateway IP
+	RoutesEditor widget.Editor
+	ExitIPEditor widget.Editor
 	StartBtn     widget.Clickable
-	StopBtn      widget.Clickable
+	StopAllBtn   widget.Clickable
+	StopBtns     []widget.Clickable // per-VPN stop buttons
 	List         widget.List
 	Error        string
 	inited       bool
@@ -56,9 +57,27 @@ func (v *VPNPanel) init() {
 func (v *VPNPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layout.Dimensions {
 	v.init()
 
-	var tunInfo core.TunInfo
+	var vpnList []core.TunInfo
 	if a.Client != nil {
-		tunInfo = a.Client.TunStatus()
+		vpnList = a.Client.TunStatusAll()
+	}
+
+	// Ensure enough stop buttons
+	for len(v.StopBtns) < len(vpnList) {
+		v.StopBtns = append(v.StopBtns, widget.Clickable{})
+	}
+
+	// Handle per-VPN stop buttons
+	for i := range vpnList {
+		if i < len(v.StopBtns) && v.StopBtns[i].Clicked(gtx) && a.Client != nil {
+			peerID := vpnList[i].PeerID
+			go func() {
+				if err := a.Client.StopTunPeer(peerID); err != nil {
+					v.Error = err.Error()
+					a.Window.Invalidate()
+				}
+			}()
+		}
 	}
 
 	// Handle start button
@@ -100,8 +119,8 @@ func (v *VPNPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layout
 		}
 	}
 
-	// Handle stop button
-	if v.StopBtn.Clicked(gtx) && a.Client != nil {
+	// Handle stop all button
+	if v.StopAllBtn.Clicked(gtx) && a.Client != nil {
 		go func() {
 			if err := a.Client.StopTun(); err != nil {
 				v.Error = err.Error()
@@ -117,13 +136,13 @@ func (v *VPNPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layout
 
 	return material.List(th, &v.List).Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			// Control card
+			// Control card (always visible — start new VPN)
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return v.layoutControlCard(gtx, th, a, tunInfo)
+				return v.layoutControlCard(gtx, th, a, vpnList)
 			}),
-			// Status card
+			// Active VPN list
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return v.layoutStatusCard(gtx, th, tunInfo)
+				return v.layoutVPNList(gtx, th, vpnList)
 			}),
 			// Info card
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -133,7 +152,7 @@ func (v *VPNPanel) Layout(gtx layout.Context, th *material.Theme, a *App) layout
 	})
 }
 
-func (v *VPNPanel) layoutControlCard(gtx layout.Context, th *material.Theme, a *App, info core.TunInfo) layout.Dimensions {
+func (v *VPNPanel) layoutControlCard(gtx layout.Context, th *material.Theme, a *App, vpnList []core.TunInfo) layout.Dimensions {
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
@@ -164,20 +183,25 @@ func (v *VPNPanel) layoutControlCard(gtx layout.Context, th *material.Theme, a *
 								}),
 								layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									if info.Enabled {
-										btn := material.Button(th, &v.StopBtn, "Stop VPN")
-										btn.Background = ErrorColor
-										btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
-										btn.CornerRadius = unit.Dp(4)
-										btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
-										return btn.Layout(gtx)
-									}
 									btn := material.Button(th, &v.StartBtn, "Start VPN")
 									btn.Background = SuccessColor
 									btn.Color = color.NRGBA{A: 255}
 									btn.CornerRadius = unit.Dp(4)
-									btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
+									btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(12), Right: unit.Dp(12)}
 									return btn.Layout(gtx)
+								}),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									if len(vpnList) == 0 {
+										return layout.Dimensions{}
+									}
+									return layout.Inset{Left: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										btn := material.Button(th, &v.StopAllBtn, "Stop All")
+										btn.Background = ErrorColor
+										btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+										btn.CornerRadius = unit.Dp(4)
+										btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(12), Right: unit.Dp(12)}
+										return btn.Layout(gtx)
+									})
 								}),
 							)
 						})
@@ -199,78 +223,121 @@ func (v *VPNPanel) layoutControlCard(gtx layout.Context, th *material.Theme, a *
 	)
 }
 
-func (v *VPNPanel) layoutStatusCard(gtx layout.Context, th *material.Theme, info core.TunInfo) layout.Dimensions {
-	if !info.Enabled {
+func (v *VPNPanel) layoutVPNList(gtx layout.Context, th *material.Theme, vpnList []core.TunInfo) layout.Dimensions {
+	if len(vpnList) == 0 {
 		return layout.Inset{Top: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Body2(th, "No active VPN connection")
+			lbl := material.Body2(th, "No active VPN connections")
 			lbl.Color = DimColor
 			return lbl.Layout(gtx)
 		})
 	}
 
-	return layout.Inset{Top: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Stack{}.Layout(gtx,
-			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-				rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
-				paint.FillShape(gtx.Ops, CardColor, rr.Op(gtx.Ops))
-				return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Min.Y)}
-			}),
-			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-				return layout.Inset{Top: unit.Dp(12), Bottom: unit.Dp(12), Left: unit.Dp(16), Right: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+	var children []layout.FlexChild
+	for i, info := range vpnList {
+		idx := i
+		vpn := info
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Stack{}.Layout(gtx,
+					layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+						rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Max.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(8)))
+						paint.FillShape(gtx.Ops, CardColor, rr.Op(gtx.Ops))
+						return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Min.Y)}
+					}),
+					layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(14), Right: unit.Dp(14)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+								// Header: role badge + peer name + stop button (right-aligned)
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									lbl := material.Body2(th, "VPN Active")
-									lbl.Color = SuccessColor
-									return lbl.Layout(gtx)
+									return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+										// Role badge
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											roleLabel := "OUT"
+											roleColor := AccentColor
+											if vpn.Role == "responder" {
+												roleLabel = "IN"
+												roleColor = DimColor
+											}
+											return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+												return layout.Stack{}.Layout(gtx,
+													layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+														rr := clip.UniformRRect(image.Rect(0, 0, gtx.Constraints.Min.X, gtx.Constraints.Min.Y), gtx.Dp(unit.Dp(3)))
+														paint.FillShape(gtx.Ops, roleColor, rr.Op(gtx.Ops))
+														return layout.Dimensions{Size: image.Pt(gtx.Constraints.Min.X, gtx.Constraints.Min.Y)}
+													}),
+													layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+														return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(6), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+															lbl := material.Caption(th, roleLabel)
+															lbl.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+															return lbl.Layout(gtx)
+														})
+													}),
+												)
+											})
+										}),
+										// Peer name
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											lbl := material.Body2(th, vpn.PeerName)
+											lbl.Color = SuccessColor
+											return lbl.Layout(gtx)
+										}),
+										// Spacer → push stop to right edge
+										layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+											return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, 0)}
+										}),
+										// Stop button
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											if idx >= len(v.StopBtns) {
+												return layout.Dimensions{}
+											}
+											btn := material.Button(th, &v.StopBtns[idx], "Stop")
+											btn.Background = ErrorColor
+											btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+											btn.CornerRadius = unit.Dp(4)
+											btn.TextSize = unit.Sp(11)
+											btn.Inset = layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(10), Right: unit.Dp(10)}
+											return btn.Layout(gtx)
+										}),
+									)
 								}),
+								// Stats row
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									return layout.Spacer{Width: unit.Dp(12)}.Layout(gtx)
-								}),
-								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									lbl := material.Caption(th, fmt.Sprintf("Peer: %s", info.PeerName))
-									lbl.Color = DimColor
-									return lbl.Layout(gtx)
+									return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+											layout.Flexed(0.20, func(gtx layout.Context) layout.Dimensions {
+												return vpnStatItem(gtx, th, "Local IP", vpn.VirtualIP)
+											}),
+											layout.Flexed(0.20, func(gtx layout.Context) layout.Dimensions {
+												return vpnStatItem(gtx, th, "Peer IP", vpn.PeerIP)
+											}),
+											layout.Flexed(0.20, func(gtx layout.Context) layout.Dimensions {
+												routeStr := "-"
+												if len(vpn.Routes) > 0 {
+													routeStr = strings.Join(vpn.Routes, ", ")
+												}
+												return vpnStatItem(gtx, th, "Routes", routeStr)
+											}),
+											layout.Flexed(0.20, func(gtx layout.Context) layout.Dimensions {
+												traffic := fmt.Sprintf("↑%s ↓%s", fmtSize(vpn.BytesUp), fmtSize(vpn.BytesDown))
+												return vpnStatItem(gtx, th, "Traffic", traffic)
+											}),
+											layout.Flexed(0.20, func(gtx layout.Context) layout.Dimensions {
+												speed := fmt.Sprintf("↑%s/s ↓%s/s", fmtSize(int64(vpn.RateUp)), fmtSize(int64(vpn.RateDown)))
+												return vpnStatItem(gtx, th, "Speed", speed)
+											}),
+										)
+									})
 								}),
 							)
-						}),
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-									layout.Flexed(0.25, func(gtx layout.Context) layout.Dimensions {
-										return vpnStatItem(gtx, th, "Local IP", info.VirtualIP)
-									}),
-									layout.Flexed(0.25, func(gtx layout.Context) layout.Dimensions {
-										return vpnStatItem(gtx, th, "Peer IP", info.PeerIP)
-									}),
-									layout.Flexed(0.25, func(gtx layout.Context) layout.Dimensions {
-										exitStr := info.ExitIP
-										if exitStr == "" {
-											exitStr = "-"
-										}
-										return vpnStatItem(gtx, th, "Exit IP", exitStr)
-									}),
-									layout.Flexed(0.25, func(gtx layout.Context) layout.Dimensions {
-										return vpnStatItem(gtx, th, "Subnet", info.Subnet)
-									}),
-								)
-							})
-						}),
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								traffic := fmt.Sprintf("Up: %s (%s/s)  Down: %s (%s/s)",
-									fmtSize(info.BytesUp), fmtSize(int64(info.RateUp)),
-									fmtSize(info.BytesDown), fmtSize(int64(info.RateDown)))
-								lbl := material.Caption(th, traffic)
-								lbl.Color = AccentColor
-								return lbl.Layout(gtx)
-							})
-						}),
-					)
-				})
-			}),
-		)
+						})
+					}),
+				)
+			})
+		}))
+	}
+
+	return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 	})
 }
 

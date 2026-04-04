@@ -605,7 +605,17 @@ func (c *Client) udpReadLoop() {
 			if err != nil {
 				continue
 			}
-			c.handleTunDataDirect(raw, nil)
+			// Find peer by UDP address
+			vpnPeerID := ""
+			c.peerConnsMu.RLock()
+			for id, pc := range c.peerConns {
+				if pc.UDPAddr != nil && pc.UDPAddr.String() == addr.String() {
+					vpnPeerID = id
+					break
+				}
+			}
+			c.peerConnsMu.RUnlock()
+			c.handleTunDataDirect(raw, vpnPeerID)
 			continue
 		}
 

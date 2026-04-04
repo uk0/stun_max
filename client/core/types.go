@@ -277,6 +277,7 @@ type TunInfo struct {
 	SNATIP    string // phantom SNAT IP for return routing
 	PeerID    string
 	PeerName  string
+	Role      string // "initiator" or "responder"
 	BytesUp   int64
 	BytesDown int64
 	RateUp    float64

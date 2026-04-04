@@ -46,13 +46,15 @@ type TunDevice struct {
 	serverHost string       // server hostname for route protection
 	peerID     string
 	peerName   string
-	bytesUp   int64
-	bytesDown int64
-	lastUp    int64
-	lastDown  int64
-	done      chan struct{}
-	closeOnce sync.Once
-	mu        sync.Mutex
+	role       string // "initiator" (A started VPN) or "responder" (B accepted VPN)
+	bytesUp    int64
+	bytesDown  int64
+	lastUp     int64
+	lastDown   int64
+	directMode int32 // 0=unknown, 1=p2p, 2=relay (per-device)
+	done       chan struct{}
+	closeOnce  sync.Once
+	mu         sync.Mutex
 }
 
 // Virtual IP allocation: derived from MAC address for stability.
@@ -121,21 +123,27 @@ func (c *Client) StartTun(peerID string, routes []string, exitIP string) error {
 	}
 
 	c.tunMu.Lock()
-	if c.tunDevice != nil {
+	if existingDev, exists := c.tunDevices[fullID]; exists {
 		c.tunMu.Unlock()
-		return fmt.Errorf("VPN already active (stop first)")
+		// Same peer — add new routes to existing VPN
+		return c.addRoutesToExistingTun(existingDev, fullID, routes)
 	}
 	c.tunMu.Unlock()
 
-	myIP := GetVirtualIP()
-	subnet := "10.7.0.0/24"
+	// Per-peer virtual IP
+	c.tunMu.RLock()
+	vpnIndex := len(c.tunDevices)
+	c.tunMu.RUnlock()
+	myIP := allocVirtualIP(vpnIndex)
+	subnet := fmt.Sprintf("10.7.%d.0/24", vpnIndex)
 
-	// Notify caller to persist the virtual IP (via event)
-	c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("VPN using virtual IP: %s (MAC-derived)", myIP)})
+	c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("VPN using virtual IP: %s (index %d)", myIP, vpnIndex)})
 
-	// Prepare ack channel to receive B's virtual IP
-	c.tunAckCh = make(chan string, 1)
-	atomic.StoreInt32(&tunDirectMode, 0) // reset transport mode tracking
+	// Per-peer ack channel
+	ackCh := make(chan string, 1)
+	c.tunMu.Lock()
+	c.tunAckChs[fullID] = ackCh
+	c.tunMu.Unlock()
 
 	err = c.sendRelay(fullID, "tun_setup", TunSetup{
 		PeerIP:  myIP,
@@ -150,7 +158,7 @@ func (c *Client) StartTun(peerID string, routes []string, exitIP string) error {
 	// Wait for B's tun_ack with its virtual IP (timeout 10s)
 	var peerIP string
 	select {
-	case peerIP = <-c.tunAckCh:
+	case peerIP = <-ackCh:
 	case <-time.After(10 * time.Second):
 		return fmt.Errorf("VPN setup timeout: peer did not respond")
 	case <-c.done:
@@ -176,7 +184,7 @@ func (c *Client) StartTun(peerID string, routes []string, exitIP string) error {
 	}
 
 	c.tunMu.Lock()
-	c.tunDevice = dev
+	c.tunDevices[fullID] = dev
 	c.tunMu.Unlock()
 
 	c.wg.Add(1)
@@ -192,6 +200,7 @@ func (c *Client) StartTun(peerID string, routes []string, exitIP string) error {
 	}
 	c.peersMu.RUnlock()
 	dev.peerName = peerName
+	dev.role = "initiator"
 
 	c.emit(EventTunStarted, LogEvent{Level: "info", Message: fmt.Sprintf("VPN started: %s <-> %s (peer: %s)", myIP, peerIP, peerName)})
 	c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("TUN VPN active: local=%s peer=%s subnet=%s", myIP, peerIP, subnet)})
@@ -199,17 +208,111 @@ func (c *Client) StartTun(peerID string, routes []string, exitIP string) error {
 	return nil
 }
 
-// StopTun tears down the active TUN VPN.
-func (c *Client) StopTun() error {
-	c.tunMu.Lock()
-	dev := c.tunDevice
-	c.tunDevice = nil
-	c.tunMu.Unlock()
+// allocVirtualIP returns a virtual IP for the Nth VPN connection.
+func allocVirtualIP(index int) string {
+	base := deriveVirtualIP()
+	ip := net.ParseIP(base).To4()
+	if ip == nil {
+		return fmt.Sprintf("10.7.%d.100", index)
+	}
+	return fmt.Sprintf("10.7.%d.%d", index, ip[3])
+}
 
-	if dev == nil {
-		return fmt.Errorf("no active VPN")
+// addRoutesToExistingTun adds new subnets to an already-active VPN with the same peer.
+func (c *Client) addRoutesToExistingTun(dev *TunDevice, peerID string, routes []string) error {
+	if len(routes) == 0 {
+		return fmt.Errorf("no routes specified")
 	}
 
+	peerIP := dev.peerIP.String()
+	added := 0
+	for _, route := range routes {
+		// Skip duplicates
+		dup := false
+		for _, existing := range dev.routes {
+			if existing == route {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+
+		// Add OS route
+		addRoute(dev.ifName, route, peerIP)
+		dev.routes = append(dev.routes, route)
+
+		// Parse for netstack proxy matching
+		_, ipNet, err := net.ParseCIDR(route)
+		if err == nil {
+			dev.routeNets = append(dev.routeNets, ipNet)
+		}
+		added++
+	}
+
+	if added == 0 {
+		return fmt.Errorf("all routes already exist")
+	}
+
+	// Notify B side about new routes
+	c.sendRelay(peerID, "tun_setup", TunSetup{
+		PeerIP: dev.virtualIP.String(),
+		Subnet: dev.subnet.String(),
+		Routes: routes,
+	})
+
+	c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf(
+		"VPN: added %d route(s) to %s: %v", added, dev.peerName, routes)})
+	return nil
+}
+
+// StopTun tears down the active TUN VPN. If peerID is empty, stops all.
+func (c *Client) StopTun() error {
+	c.tunMu.Lock()
+	if len(c.tunDevices) == 0 {
+		c.tunMu.Unlock()
+		return fmt.Errorf("no active VPN")
+	}
+	// Copy and clear all
+	devs := make(map[string]*TunDevice)
+	for k, v := range c.tunDevices {
+		devs[k] = v
+		delete(c.tunDevices, k)
+	}
+	c.tunMu.Unlock()
+
+	for _, dev := range devs {
+		c.stopTunDevice(dev)
+	}
+	c.emit(EventTunStopped, LogEvent{Level: "info", Message: "All VPNs stopped"})
+	c.ReportFeatures()
+	return nil
+}
+
+// StopTunPeer stops VPN for a specific peer.
+func (c *Client) StopTunPeer(peerID string) error {
+	fullID, err := c.resolvePeerID(peerID)
+	if err != nil {
+		return err
+	}
+	c.tunMu.Lock()
+	dev, ok := c.tunDevices[fullID]
+	if !ok {
+		c.tunMu.Unlock()
+		return fmt.Errorf("no VPN with peer %s", peerID)
+	}
+	delete(c.tunDevices, fullID)
+	c.tunMu.Unlock()
+
+	c.stopTunDevice(dev)
+	c.emit(EventTunStopped, LogEvent{Level: "info", Message: fmt.Sprintf("VPN stopped: %s", dev.peerName)})
+	c.ReportFeatures()
+	return nil
+}
+
+// stopTunDevice tears down a single TUN device.
+func (c *Client) stopTunDevice(dev *TunDevice) {
 	c.sendRelay(dev.peerID, "tun_teardown", TunTeardown{})
 
 	if dev.nsProxy != nil {
@@ -231,7 +334,6 @@ func (c *Client) StopTun() error {
 
 	c.emit(EventTunStopped, LogEvent{Level: "info", Message: "VPN stopped"})
 	c.ReportFeatures()
-	return nil
 }
 
 func (c *Client) createTunDevice(localIP, peerIP, subnet, peerID string) (*TunDevice, error) {
@@ -268,9 +370,9 @@ func (c *Client) handleTunSetup(msg Message) {
 	}
 
 	c.tunMu.Lock()
-	if old := c.tunDevice; old != nil {
-		// If old VPN peer is gone or it's the same peer reconnecting, tear down old session
-		c.tunDevice = nil
+	if old, exists := c.tunDevices[msg.From]; exists {
+		// Same peer reconnecting — tear down old session
+		delete(c.tunDevices, msg.From)
 		c.tunMu.Unlock()
 		c.emit(EventLog, LogEvent{Level: "info", Message: "Replacing stale VPN session"})
 		old.closeOnce.Do(func() { close(old.done) })
@@ -324,9 +426,10 @@ func (c *Client) handleTunSetup(msg Message) {
 	}
 	c.peersMu.RUnlock()
 	dev.peerName = peerName
+	dev.role = "responder"
 
 	c.tunMu.Lock()
-	c.tunDevice = dev
+	c.tunDevices[msg.From] = dev
 	c.tunMu.Unlock()
 
 	c.wg.Add(1)
@@ -393,9 +496,12 @@ func (c *Client) handleTunAck(msg Message) {
 	if err := json.Unmarshal(msg.Payload, &ack); err != nil {
 		return
 	}
-	if c.tunAckCh != nil {
+	c.tunMu.RLock()
+	ch, ok := c.tunAckChs[msg.From]
+	c.tunMu.RUnlock()
+	if ok {
 		select {
-		case c.tunAckCh <- ack.VirtualIP:
+		case ch <- ack.VirtualIP:
 		default:
 		}
 	}
@@ -405,7 +511,7 @@ func (c *Client) handleTunAck(msg Message) {
 // On B side with routes: applies SNAT before writing to TUN.
 func (c *Client) handleTunData(msg Message) {
 	c.tunMu.RLock()
-	dev := c.tunDevice
+	dev := c.tunDevices[msg.From]
 	c.tunMu.RUnlock()
 
 	if dev == nil {
@@ -458,11 +564,20 @@ func (c *Client) handleTunData(msg Message) {
 	}
 }
 
-// handleTunDataDirect processes VPN data received via direct TCP (P2P).
-// Same logic as handleTunData but data is already decompressed.
-func (c *Client) handleTunDataDirect(raw []byte, conn net.Conn) {
+// handleTunDataDirect processes VPN data received via P2P UDP.
+// peerID identifies which VPN device should receive the packet.
+func (c *Client) handleTunDataDirect(raw []byte, peerID string) {
 	c.tunMu.RLock()
-	dev := c.tunDevice
+	var dev *TunDevice
+	if peerID != "" {
+		dev = c.tunDevices[peerID]
+	} else {
+		// Fallback: use first device (backward compat)
+		for _, d := range c.tunDevices {
+			dev = d
+			break
+		}
+	}
 	c.tunMu.RUnlock()
 
 	if dev == nil {
@@ -587,14 +702,14 @@ func (dev *TunDevice) applySNAT(pkt []byte) []byte {
 // handleTunTeardown processes a tun_teardown from a peer.
 func (c *Client) handleTunTeardown(msg Message) {
 	c.tunMu.Lock()
-	dev := c.tunDevice
-	if dev != nil && dev.peerID == msg.From {
-		c.tunDevice = nil
-	} else {
-		c.tunMu.Unlock()
-		return
+	dev, ok := c.tunDevices[msg.From]
+	if ok {
+		delete(c.tunDevices, msg.From)
 	}
 	c.tunMu.Unlock()
+	if !ok || dev == nil {
+		return
+	}
 
 	dev.closeOnce.Do(func() { close(dev.done) })
 	if dev.nsProxy != nil {
@@ -614,9 +729,6 @@ func (c *Client) handleTunTeardown(msg Message) {
 }
 
 // tunReadLoop reads IP packets from the TUN device and sends them to the peer.
-// Transport priority: UDP P2P > WebSocket relay
-var tunDirectMode int32 // 0=unknown, 1=p2p, 2=relay
-
 func (c *Client) tunReadLoop(dev *TunDevice) {
 	defer c.wg.Done()
 
@@ -670,14 +782,14 @@ func (c *Client) tunReadLoop(dev *TunDevice) {
 
 		// UDP P2P (primary — fast, no server overhead)
 		if c.tunSendUDP(dev.peerID, compressed) {
-			if atomic.CompareAndSwapInt32(&tunDirectMode, 0, 1) || atomic.CompareAndSwapInt32(&tunDirectMode, 2, 1) {
+			if atomic.CompareAndSwapInt32(&dev.directMode, 0, 1) || atomic.CompareAndSwapInt32(&dev.directMode, 2, 1) {
 				c.emit(EventLog, LogEvent{Level: "info", Message: "VPN data: using P2P UDP"})
 			}
 			continue
 		}
 
 		// Relay fallback (slower, through server)
-		if atomic.CompareAndSwapInt32(&tunDirectMode, 0, 2) || atomic.CompareAndSwapInt32(&tunDirectMode, 1, 2) {
+		if atomic.CompareAndSwapInt32(&dev.directMode, 0, 2) || atomic.CompareAndSwapInt32(&dev.directMode, 1, 2) {
 			c.emit(EventLog, LogEvent{Level: "warn", Message: "VPN data: using server relay (no P2P)"})
 		}
 		encoded := base64.StdEncoding.EncodeToString(compressed)
@@ -918,15 +1030,26 @@ func (dev *TunDevice) applyReverseSNAT(pkt []byte) []byte {
 	return pkt
 }
 
-// TunStatus returns a snapshot of the current TUN VPN state.
+// TunStatus returns the first active VPN (backward compat for GUI).
 func (c *Client) TunStatus() TunInfo {
-	c.tunMu.RLock()
-	dev := c.tunDevice
-	c.tunMu.RUnlock()
-
-	if dev == nil {
+	all := c.TunStatusAll()
+	if len(all) == 0 {
 		return TunInfo{}
 	}
+	return all[0]
+}
+
+// TunStatusAll returns snapshots of all active TUN VPN connections.
+func (c *Client) TunStatusAll() []TunInfo {
+	c.tunMu.RLock()
+	devs := make([]*TunDevice, 0, len(c.tunDevices))
+	for _, d := range c.tunDevices {
+		devs = append(devs, d)
+	}
+	c.tunMu.RUnlock()
+
+	var result []TunInfo
+	for _, dev := range devs {
 
 	bytesUp := atomic.LoadInt64(&dev.bytesUp)
 	bytesDown := atomic.LoadInt64(&dev.bytesDown)
@@ -951,7 +1074,7 @@ func (c *Client) TunStatus() TunInfo {
 		snatStr = dev.snatIP.String()
 	}
 
-	return TunInfo{
+	result = append(result, TunInfo{
 		Enabled:   true,
 		VirtualIP: dev.virtualIP.String(),
 		PeerIP:    dev.peerIP.String(),
@@ -961,43 +1084,29 @@ func (c *Client) TunStatus() TunInfo {
 		SNATIP:    snatStr,
 		PeerID:    dev.peerID,
 		PeerName:  dev.peerName,
+		Role:      dev.role,
 		BytesUp:   bytesUp,
 		BytesDown: bytesDown,
 		RateUp:    rateUp,
 		RateDown:  rateDown,
+	})
 	}
+	return result
 }
 
 // tunCleanup is called during Disconnect to stop any active TUN.
 func (c *Client) tunCleanup() {
 	c.tunMu.Lock()
-	dev := c.tunDevice
-	c.tunDevice = nil
+	devs := make(map[string]*TunDevice)
+	for k, v := range c.tunDevices {
+		devs[k] = v
+		delete(c.tunDevices, k)
+	}
 	c.tunMu.Unlock()
 
-	if dev == nil {
-		return
+	for _, dev := range devs {
+		c.stopTunDevice(dev)
 	}
-
-	c.sendRelay(dev.peerID, "tun_teardown", TunTeardown{})
-
-	dev.closeOnce.Do(func() { close(dev.done) })
-	if dev.nsProxy != nil {
-		dev.nsProxy.Close()
-	}
-	if dev.proxy != nil {
-		dev.proxy.Close()
-	}
-	if dev.iface != nil {
-		dev.iface.Close()
-	}
-	for _, route := range dev.routes {
-		removeRoute(dev.ifName, route)
-	}
-	cleanupSNATRoute(dev.ifName, dev.snatIP)
-	disableNAT(dev.ifName)
-	removeTunInterface(dev.ifName)
-	removeServerRoute(dev.serverHost)
 }
 
 // ipHeaderChecksum computes the IP header checksum.

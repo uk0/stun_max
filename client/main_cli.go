@@ -682,8 +682,8 @@ func cmdHop(args []string) {
 
 func cmdVPN(args []string) {
 	if len(args) == 0 {
-		fmt.Printf("%sUsage: vpn <peer> [subnet1 ...] [--exit-ip IP] | vpn stop | vpn status%s\n", cRed, cReset)
-		fmt.Printf("%sExample: vpn win10 10.88.51.0/24%s\n", cGray, cReset)
+		fmt.Printf("%sUsage: vpn <peer> [subnet1 ...] [--exit-ip IP] | vpn stop [peer] | vpn status%s\n", cRed, cReset)
+		fmt.Printf("%sExample: vpn win10 10.88.51.0/24 192.168.1.0/24%s\n", cGray, cReset)
 		fmt.Printf("%s         vpn win10 10.88.51.0/24 --exit-ip 10.88.51.27%s\n", cGray, cReset)
 		return
 	}
@@ -691,33 +691,36 @@ func cmdVPN(args []string) {
 	subcmd := strings.ToLower(args[0])
 	switch subcmd {
 	case "stop":
-		if err := client.StopTun(); err != nil {
-			fmt.Printf("%s%v%s\n", cRed, err, cReset)
+		if len(args) >= 2 {
+			if err := client.StopTunPeer(args[1]); err != nil {
+				fmt.Printf("%s%v%s\n", cRed, err, cReset)
+			}
+		} else {
+			if err := client.StopTun(); err != nil {
+				fmt.Printf("%s%v%s\n", cRed, err, cReset)
+			}
 		}
 	case "status":
-		info := client.TunStatus()
-		if !info.Enabled {
+		allVPNs := client.TunStatusAll()
+		if len(allVPNs) == 0 {
 			fmt.Printf("%sNo active VPN.%s\n", cGray, cReset)
 			return
 		}
-		fmt.Printf("\n%sVPN Status:%s\n", cBold, cReset)
-		fmt.Printf("  Local IP:  %s%s%s\n", cGreen, info.VirtualIP, cReset)
-		fmt.Printf("  Peer IP:   %s%s%s\n", cGreen, info.PeerIP, cReset)
-		fmt.Printf("  Subnet:    %s\n", info.Subnet)
-		if info.ExitIP != "" {
-			fmt.Printf("  Exit IP:   %s%s%s\n", cGreen, info.ExitIP, cReset)
+		fmt.Printf("\n%sActive VPNs (%d):%s\n", cBold, len(allVPNs), cReset)
+		for i, info := range allVPNs {
+			fmt.Printf("\n  %s[%d] %s%s\n", cCyan, i+1, info.PeerName, cReset)
+			fmt.Printf("  Local IP:  %s%s%s\n", cGreen, info.VirtualIP, cReset)
+			fmt.Printf("  Peer IP:   %s%s%s\n", cGreen, info.PeerIP, cReset)
+			fmt.Printf("  Subnet:    %s\n", info.Subnet)
+			if info.ExitIP != "" {
+				fmt.Printf("  Exit IP:   %s%s%s\n", cGreen, info.ExitIP, cReset)
+			}
+			if len(info.Routes) > 0 {
+				fmt.Printf("  Routes:    %s\n", strings.Join(info.Routes, ", "))
+			}
+			fmt.Printf("  Traffic:   ↑%s ↓%s\n", fmtBytes(info.BytesUp), fmtBytes(info.BytesDown))
 		}
-		if info.SNATIP != "" {
-			fmt.Printf("  SNAT IP:   %s\n", info.SNATIP)
-		}
-		fmt.Printf("  Peer:      %s (%s)\n", info.PeerName, shortID(info.PeerID))
-		if len(info.Routes) > 0 {
-			fmt.Printf("  Routes:    %s\n", strings.Join(info.Routes, ", "))
-		}
-		fmt.Printf("  Traffic:   ↑%s ↓%s\n", fmtBytes(info.BytesUp), fmtBytes(info.BytesDown))
-		if info.RateUp > 0 || info.RateDown > 0 {
-			fmt.Printf("  Rate:      ↑%s/s ↓%s/s\n", fmtBytes(int64(info.RateUp)), fmtBytes(int64(info.RateDown)))
-		}
+		fmt.Println()
 		fmt.Println()
 	default:
 		// args[0] = peer, rest = subnets or --exit-ip

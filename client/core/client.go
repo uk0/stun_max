@@ -67,10 +67,10 @@ type Client struct {
 	hopBridgeByTunnel map[string]*HopBridge  // tunnelID → bridge (both inbound and outbound)
 	hopsMu            sync.RWMutex
 
-	// TUN VPN
-	tunDevice  *TunDevice
+	// TUN VPN (multiple simultaneous connections)
+	tunDevices map[string]*TunDevice // peerID → device
 	tunMu      sync.RWMutex
-	tunAckCh   chan string // receives B's virtual IP from tun_ack
+	tunAckChs  map[string]chan string // peerID → ack channel
 
 	// Per-peer gVisor netstack for port forwarding
 	fwdNetstacks   map[string]*forwardNetstack // peerID → netstack
@@ -112,6 +112,8 @@ func NewClient(cfg ClientConfig) *Client {
 		hopBridgeByTunnel: make(map[string]*HopBridge),
 		pendingLeaves: make(map[string]*time.Timer),
 		fwdNetstacks:  make(map[string]*forwardNetstack),
+		tunDevices:    make(map[string]*TunDevice),
+		tunAckChs:     make(map[string]chan string),
 		allowForward: true,
 		localOnly:    true,
 		done:         make(chan struct{}),
@@ -129,11 +131,15 @@ func (c *Client) ReportFeatures() {
 
 	// VPN status
 	c.tunMu.RLock()
-	if c.tunDevice != nil {
-		features["vpn"] = c.tunDevice.peerName
-		if len(c.tunDevice.routes) > 0 {
-			features["vpn_routes"] = fmt.Sprintf("%v", c.tunDevice.routes)
+	var vpnPeers []string
+	for _, dev := range c.tunDevices {
+		vpnPeers = append(vpnPeers, dev.peerName)
+		if len(dev.routes) > 0 {
+			features["vpn_routes"] = fmt.Sprintf("%v", dev.routes)
 		}
+	}
+	if len(vpnPeers) > 0 {
+		features["vpn"] = fmt.Sprintf("%v", vpnPeers)
 	}
 	c.tunMu.RUnlock()
 
@@ -875,8 +881,10 @@ func (c *Client) handlePeerList(msg Message) {
 				if newID, ok := newNameMap[p.Name]; ok {
 					// Update VPN peer ID if needed
 					c.tunMu.Lock()
-					if c.tunDevice != nil && c.tunDevice.peerID == p.ID {
-						c.tunDevice.peerID = newID
+					if dev, ok := c.tunDevices[p.ID]; ok {
+						delete(c.tunDevices, p.ID)
+						dev.peerID = newID
+						c.tunDevices[newID] = dev
 						c.tunMu.Unlock()
 						c.emit(EventLog, LogEvent{Level: "info", Message: fmt.Sprintf("VPN peer %s reconnected with new ID", p.Name)})
 					} else {
@@ -927,11 +935,13 @@ func (c *Client) handlePeerList(msg Message) {
 
 					// Clean up VPN if this peer was our VPN partner
 					c.tunMu.Lock()
-					if c.tunDevice != nil && c.tunDevice.peerID == peerCopy.ID {
-						dev := c.tunDevice
-						c.tunDevice = nil
+					if dev, ok := c.tunDevices[peerCopy.ID]; ok {
+						delete(c.tunDevices, peerCopy.ID)
 						c.tunMu.Unlock()
 						dev.closeOnce.Do(func() { close(dev.done) })
+						if dev.nsProxy != nil {
+							dev.nsProxy.Close()
+						}
 						if dev.proxy != nil {
 							dev.proxy.Close()
 						}
@@ -944,7 +954,7 @@ func (c *Client) handlePeerList(msg Message) {
 						cleanupSNATRoute(dev.ifName, dev.snatIP)
 						disableNAT(dev.ifName)
 						removeTunInterface(dev.ifName)
-						c.emit(EventTunStopped, LogEvent{Level: "info", Message: "VPN stopped: peer disconnected"})
+						c.emit(EventTunStopped, LogEvent{Level: "info", Message: fmt.Sprintf("VPN stopped: peer %s disconnected", displayName)})
 					} else {
 						c.tunMu.Unlock()
 					}
