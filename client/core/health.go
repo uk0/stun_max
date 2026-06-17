@@ -64,6 +64,25 @@ func directRecvAgeNano(pc *PeerConn, nowNano int64) int64 {
 	return nowNano - atomic.LoadInt64(&pc.directLastRecvNano)
 }
 
+// touchDirectRecvByAddr refreshes direct-path liveness for whichever peer owns the
+// given UDP address. Called on every inbound UDP packet so that *any* direct
+// traffic — data, PUNCH, even an old peer that never echoes PONG2 — keeps the path
+// alive. Lock-free store under a shared read lock; cheap enough for the hot path.
+func (c *Client) touchDirectRecvByAddr(addr *net.UDPAddr) {
+	if addr == nil {
+		return
+	}
+	nano := time.Now().UnixNano()
+	c.peerConnsMu.RLock()
+	for _, pc := range c.peerConns {
+		if pc.UDPAddr != nil && pc.UDPAddr.Port == addr.Port && pc.UDPAddr.IP.Equal(addr.IP) {
+			atomic.StoreInt64(&pc.directLastRecvNano, nano)
+			break
+		}
+	}
+	c.peerConnsMu.RUnlock()
+}
+
 // sendDirectPing sends a PING2 probe to a peer over the shared UDP socket.
 func (c *Client) sendDirectPing(addr *net.UDPAddr) {
 	if addr == nil {

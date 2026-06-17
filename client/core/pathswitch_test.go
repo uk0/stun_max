@@ -74,6 +74,29 @@ func TestRefreshPeerTransports_RelayModeNeverDirect(t *testing.T) {
 	}
 }
 
+func TestTouchByAddr_DataKeepsHealthy(t *testing.T) {
+	c := newTestClient()
+	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 9), Port: 7000}
+	pc := &PeerConn{PeerID: "p", Mode: "direct", UDPAddr: addr, directHealthy: true}
+	// Probes went silent past the liveness window...
+	atomic.StoreInt64(&pc.directLastRecvNano,
+		time.Now().Add(-directLivenessWindow-5*time.Second).UnixNano())
+	c.peerConns["p"] = pc
+
+	// ...but bulk data is still arriving on the direct path.
+	c.touchDirectRecvByAddr(addr)
+	c.refreshPeerTransports()
+	if !c.peerDirectUsable("p") {
+		t.Fatalf("data-driven liveness should keep the direct path healthy")
+	}
+}
+
+func TestTouchByAddr_UnknownAddrAndNilSafe(t *testing.T) {
+	c := newTestClient()
+	c.touchDirectRecvByAddr(&net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 1}) // no peer — no-op
+	c.touchDirectRecvByAddr(nil)                                             // must not panic
+}
+
 func TestDirectEndpoint_RequiresHealthy(t *testing.T) {
 	c := newTestClient()
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 4000}

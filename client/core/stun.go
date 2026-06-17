@@ -1036,6 +1036,10 @@ func (c *Client) udpReadLoop() {
 		}
 		data := buf[:n]
 
+		// Data-driven liveness: any inbound packet from a known peer keeps its
+		// direct path alive (robust to probe loss and peers that don't echo PONG2).
+		c.touchDirectRecvByAddr(addr)
+
 		// PUNCH handshake
 		if bytes.HasPrefix(data, prefixPunch) && !bytes.HasPrefix(data, prefixPunchAck) {
 			peerID := string(data[len(prefixPunch):])
@@ -1451,8 +1455,8 @@ func (c *Client) startRetryLoop() {
 				if pc.UDPAddr == nil {
 					continue
 				}
-				if pc.Mode == "direct" {
-					continue // already connected
+				if pc.Mode == "direct" && pc.directHealthy {
+					continue // already connected and healthy
 				}
 				// After 5 failed punches, mark as relay (but keep retrying)
 				if pc.Mode == "connecting" && pc.PunchFails >= 5 {
