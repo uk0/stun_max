@@ -158,13 +158,3 @@ func splitIDTS(payload []byte) (id string, ts string, ok bool) {
 	}
 	return "", "", false
 }
-
-// directRTT returns the current EWMA RTT for a peer's direct path (0 if unknown).
-func (c *Client) directRTT(peerID string) time.Duration {
-	c.peerConnsMu.RLock()
-	defer c.peerConnsMu.RUnlock()
-	if pc, ok := c.peerConns[peerID]; ok {
-		return pc.DirectRTT
-	}
-	return 0
-}
