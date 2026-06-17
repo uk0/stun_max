@@ -649,6 +649,10 @@ func (c *Client) handleStunInfo(msg Message) {
 	// Attempt hole punch if we have a UDP socket
 	if c.udpConn != nil && pc.Mode != "direct" {
 		go c.attemptHolePunch(msg.From, isLAN)
+		if !isLAN {
+			// Hard-NAT peers get a coordinated, simultaneous punch (punch_coord.go).
+			go c.maybeCoordinatePunch(msg.From)
+		}
 	}
 }
 
@@ -823,6 +827,32 @@ func (c *Client) attemptHolePunch(peerID string, isLAN bool) {
 			if i%50 == 0 {
 				time.Sleep(time.Millisecond) // yield to avoid flooding
 			}
+		}
+	}
+
+	// Phase 5: Targeted spray at the peer's shared predicted ports (coordination).
+	// When the peer has told us where its symmetric NAT will likely map next
+	// (punch_coord.go), aim there directly instead of relying on blind scanning —
+	// far higher hit rate, and bidirectional when both sides exchange predictions.
+	c.peerConnsMu.RLock()
+	peerPorts := append([]int(nil), pc.PeerPredictedPorts...)
+	c.peerConnsMu.RUnlock()
+	if len(peerPorts) > 0 {
+	sprayLoop:
+		for round := 0; round < 6; round++ {
+			select {
+			case <-c.done:
+				break sprayLoop
+			default:
+			}
+			for _, p := range peerPorts {
+				dst := &net.UDPAddr{IP: addr.IP, Port: p}
+				udp.WriteToUDP(punch, dst)
+				for _, conn := range extraConns {
+					conn.WriteToUDP(punch, dst)
+				}
+			}
+			time.Sleep(25 * time.Millisecond)
 		}
 	}
 
@@ -1440,6 +1470,8 @@ func (c *Client) startRetryLoop() {
 
 			for _, peerID := range retryPeers {
 				go func(pid string) {
+					// Hard-NAT peers: drive a coordinated simultaneous punch (throttled).
+					c.maybeCoordinatePunch(pid)
 					c.attemptHolePunch(pid, false)
 					// If punch didn't succeed, increment failure counter
 					c.peerConnsMu.Lock()

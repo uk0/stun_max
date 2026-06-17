@@ -1341,6 +1341,8 @@ func (c *Client) handleRelayData(msg Message) {
 		c.handleFileStream(inner)
 	case "p2p_map":
 		c.handleP2PMap(inner)
+	case "punch_sync":
+		c.handlePunchSync(inner)
 	case "hop_forward":
 		c.handleHopForward(inner)
 	case "hop_forward_accept":

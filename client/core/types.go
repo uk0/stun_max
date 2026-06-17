@@ -75,6 +75,10 @@ type PeerConn struct {
 	directLastRecvNano int64         // atomic: unixNano of last PONG2 on the direct path
 	directHealthy      bool          // sticky: direct path usable now (hysteresis); guarded by peerConnsMu
 	lastSwitch         time.Time     // last transport flip (anti-flap); guarded by peerConnsMu
+
+	// Coordinated punching (see punch_coord.go). Guarded by peerConnsMu.
+	PeerPredictedPorts []int     // peer's shared predicted external ports (symmetric NAT targeting)
+	lastCoord          time.Time // last coordination offer sent (throttle)
 }
 
 // TunnelOpen is sent to request opening a tunnel to a peer's local port.
