@@ -700,7 +700,7 @@ func (c *Client) sendViaP2P(peerID string, udpPayload []byte, relayType string, 
 	c.peerConnsMu.RLock()
 	pc := c.peerConns[peerID]
 	var addr *net.UDPAddr
-	if pc != nil && pc.Mode == "direct" && pc.UDPAddr != nil {
+	if pc != nil && pc.directHealthy && pc.UDPAddr != nil {
 		addr = pc.UDPAddr
 	}
 	c.peerConnsMu.RUnlock()
@@ -890,6 +890,8 @@ func (c *Client) resetP2PState() {
 		pc.Crypto = nil
 		pc.AutoHopVia = ""
 		pc.AutoHopID = ""
+		pc.directHealthy = false
+		atomic.StoreInt64(&pc.directLastRecvNano, 0)
 	}
 	c.peerConnsMu.Unlock()
 

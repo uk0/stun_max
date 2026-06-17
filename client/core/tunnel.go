@@ -91,7 +91,7 @@ func (c *Client) getForwardMode(peerID string) string {
 	c.peerConnsMu.RLock()
 	defer c.peerConnsMu.RUnlock()
 	if pc, ok := c.peerConns[peerID]; ok {
-		if pc.Mode == "direct" {
+		if pc.Mode == "direct" && pc.directHealthy {
 			return "P2P"
 		}
 		if pc.AutoHopVia != "" {
@@ -346,7 +346,7 @@ func (c *Client) tunnelReadLoop(tc *TunnelConn, peerID string) {
 	// Try P2P UDP with reliable transport (RUTP)
 	c.peerConnsMu.RLock()
 	pc := c.peerConns[peerID]
-	hasP2P := pc != nil && pc.Mode == "direct" && pc.UDPAddr != nil
+	hasP2P := pc != nil && pc.directHealthy && pc.UDPAddr != nil
 	var directConn net.Conn
 	if pc != nil {
 		directConn = pc.DirectTCP

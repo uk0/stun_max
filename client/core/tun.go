@@ -1045,11 +1045,8 @@ func compressRaw(data []byte) []byte {
 // Used when Direct TCP fails but UDP hole punch succeeded.
 // Format: "VPN:" + compressed data (simple prefix to distinguish from PUNCH/KEY messages)
 func (c *Client) tunSendUDP(peerID string, compressed []byte) bool {
-	c.peerConnsMu.RLock()
-	pc := c.peerConns[peerID]
-	c.peerConnsMu.RUnlock()
-
-	if pc == nil || pc.Mode != "direct" || pc.UDPAddr == nil {
+	addr, ok := c.directEndpoint(peerID)
+	if !ok {
 		return false
 	}
 
@@ -1058,7 +1055,7 @@ func (c *Client) tunSendUDP(peerID string, compressed []byte) bool {
 	copy(msg[:4], []byte("VPN:"))
 	copy(msg[4:], compressed)
 
-	return c.udpSend(msg, pc.UDPAddr) == nil
+	return c.udpSend(msg, addr) == nil
 }
 
 // applyReverseSNAT checks if a packet from TUN is a reply to a SNAT'd connection.

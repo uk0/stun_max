@@ -850,6 +850,11 @@ func (c *Client) onHolePunchSuccess(peerID string, addr *net.UDPAddr) {
 	pc.Mode = "direct"
 	pc.UDPAddr = addr
 	pc.PunchFails = 0 // reset on success
+	// A fresh punch is a strong liveness signal — let the data plane use the direct
+	// path immediately. The health controller (pathswitch.go) maintains it from here.
+	pc.directHealthy = true
+	pc.lastSwitch = time.Now()
+	markDirectRecvNano(pc)
 
 	if pc.Crypto == nil {
 		crypto, err := NewPeerCrypto()
@@ -1036,6 +1041,16 @@ func (c *Client) udpReadLoop() {
 					c.handleKeyExchange(peerID, pubKey, addr)
 				}
 			}
+			continue
+		}
+
+		// Health probe with RTT (see health.go)
+		if bytes.HasPrefix(data, prefixPing2) {
+			c.handlePing2(addr, data[len(prefixPing2):])
+			continue
+		}
+		if bytes.HasPrefix(data, prefixPong2) {
+			c.handlePong2(addr, data[len(prefixPong2):])
 			continue
 		}
 
@@ -1370,7 +1385,7 @@ func (c *Client) startRetryLoop() {
 	defer c.wg.Done()
 
 	retryTicker := time.NewTicker(15 * time.Second)
-	keepaliveTicker := time.NewTicker(10 * time.Second) // NAT keepalive every 10s (safe for most NATs)
+	keepaliveTicker := time.NewTicker(5 * time.Second) // PING2 = NAT keepalive + RTT/liveness probe
 	defer retryTicker.Stop()
 	defer keepaliveTicker.Stop()
 
@@ -1380,18 +1395,21 @@ func (c *Client) startRetryLoop() {
 			return
 
 		case <-keepaliveTicker.C:
+			// Collect direct-peer addresses, then probe outside the lock.
 			c.peerConnsMu.RLock()
-			c.connMu.Lock()
-			udp := c.udpConn
-			c.connMu.Unlock()
-			if udp != nil {
-				for _, pc := range c.peerConns {
-					if pc.Mode == "direct" && pc.UDPAddr != nil {
-						udp.WriteToUDP([]byte("PING"), pc.UDPAddr)
-					}
+			pingAddrs := make([]*net.UDPAddr, 0, len(c.peerConns))
+			for _, pc := range c.peerConns {
+				if pc.Mode == "direct" && pc.UDPAddr != nil {
+					pingAddrs = append(pingAddrs, pc.UDPAddr)
 				}
 			}
 			c.peerConnsMu.RUnlock()
+			// PING2 doubles as NAT keepalive and RTT/liveness probe (health.go).
+			for _, addr := range pingAddrs {
+				c.sendDirectPing(addr)
+			}
+			// Re-evaluate transports and migrate live tunnels if a path changed.
+			c.refreshPeerTransports()
 
 		case <-retryTicker.C:
 			// Periodically broadcast P2P map for auto-hop discovery
@@ -1409,6 +1427,7 @@ func (c *Client) startRetryLoop() {
 				// After 5 failed punches, mark as relay (but keep retrying)
 				if pc.Mode == "connecting" && pc.PunchFails >= 5 {
 					pc.Mode = "relay"
+					pc.directHealthy = false
 					c.emit(EventLog, LogEvent{Level: "warn", Message: fmt.Sprintf("P2P punch failed 5 times for %s, using relay", shortID(peerID))})
 					// Try to discover auto-hop route
 					if pc.AutoHopVia == "" {

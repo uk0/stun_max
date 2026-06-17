@@ -908,15 +908,11 @@ func (c *Client) sendFileChunks(ft *activeFileTransfer) {
 
 // sendFileP2P sends file data via P2P UDP. Returns true if sent successfully.
 func (c *Client) sendFileP2P(peerID string, udpMsg []byte) bool {
-	c.peerConnsMu.RLock()
-	pc := c.peerConns[peerID]
-	c.peerConnsMu.RUnlock()
-
-	if pc == nil || pc.Mode != "direct" || pc.UDPAddr == nil {
+	addr, ok := c.directEndpoint(peerID)
+	if !ok {
 		return false
 	}
-
-	return c.udpSend(udpMsg, pc.UDPAddr) == nil
+	return c.udpSend(udpMsg, addr) == nil
 }
 
 // processFileDataP2P handles file data received via P2P UDP (SF: prefix).

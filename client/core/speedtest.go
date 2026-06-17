@@ -210,7 +210,7 @@ func (c *Client) resolveSTTransport(peerID, mode string) string {
 	// auto: check if P2P is available
 	c.peerConnsMu.RLock()
 	pc := c.peerConns[peerID]
-	hasP2P := pc != nil && pc.Mode == "direct" && pc.UDPAddr != nil
+	hasP2P := pc != nil && pc.directHealthy && pc.UDPAddr != nil
 	c.peerConnsMu.RUnlock()
 	if hasP2P {
 		return "p2p"
@@ -224,7 +224,7 @@ func (c *Client) stSend(peerID, transport string, udpPayload []byte, relayType s
 		c.peerConnsMu.RLock()
 		pc := c.peerConns[peerID]
 		var addr *net.UDPAddr
-		if pc != nil && pc.Mode == "direct" && pc.UDPAddr != nil {
+		if pc != nil && pc.directHealthy && pc.UDPAddr != nil {
 			addr = pc.UDPAddr
 		}
 		c.peerConnsMu.RUnlock()
